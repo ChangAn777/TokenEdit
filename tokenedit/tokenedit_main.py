@@ -248,7 +248,8 @@ class TokenEditEditor:
                     sample_types.append(('distract', closure['distract']))
                 
                 for sample_type, prompts in sample_types:
-                    for prompt in prompts[:1]:  # 每类只取一个样本加速训练
+                    num_samples = max(1, int(self.hparams.num_paraphrase))
+                    for prompt in prompts[:num_samples]:
                         # 计算损失
                         losses = self._compute_sample_loss(
                             edit_id,
@@ -550,6 +551,7 @@ class TokenEditEditor:
         with torch.no_grad():
             output_ids = self.model.generate(
                 inputs['input_ids'],
+                attention_mask=inputs.get('attention_mask'),
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id

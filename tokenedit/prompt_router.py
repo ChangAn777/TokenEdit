@@ -32,7 +32,13 @@ class PromptRouter:
         """加载关系模板"""
         # 可以从resource/relations.json加载
         return {
-            "capital": ["capital", "首都", "capital city", "is located in"],
+            "capital": [
+                "capital",
+                "capital of",
+                "capital city",
+                "首都",
+                "is the capital"
+            ],
             "president": ["president", "总统", "leader of", "head of state"],
             "founder": ["founder", "创始人", "founded by", "established by"],
             "ceo": ["CEO", "chief executive", "首席执行官"],
@@ -76,9 +82,6 @@ class PromptRouter:
         Returns:
             edit_id: 匹配的编辑ID，或None（不触发任何编辑）
         """
-        if len(self.edit_embeddings) == 0:
-            return None
-
         # 优先使用方法2: 关系模板匹配（更准确）
         if self.hparams.use_template_routing:
             for edit_id, info in self.edit_info.items():
@@ -95,6 +98,9 @@ class PromptRouter:
 
         # 方法1: Embedding相似度路由（作为备选）
         if self.hparams.use_embedding_routing:
+            if len(self.edit_embeddings) == 0:
+                return None
+
             if prompt_embedding is None:
                 # 计算prompt的嵌入
                 inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
