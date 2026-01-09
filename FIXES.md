@@ -1,10 +1,21 @@
 # 代码修复说明
 
 ## 问题
+
+### 问题 1：`model_config.py 未找到`
 在远程服务器运行实验时报错：`model_config.py 未找到`
 
-## 原因分析
+**原因分析：**
 `experiments/` 目录下的脚本使用 `sys.path.append('..')` 来导入父目录的 `model_config.py`，但这个相对路径在某些执行上下文中可能不正确，导致 Python 无法找到模块。
+
+### 问题 2：多GPU设备冲突
+```
+RuntimeError: Expected all tensors to be on the same device,
+but found at least two devices, cuda:1 and cuda:0!
+```
+
+**原因分析：**
+使用 `device_map="auto"` 时，accelerate 库会自动将模型分配到多个 GPU，导致张量在不同设备上，计算时出现设备不匹配错误。
 
 ## 修复内容
 
@@ -37,7 +48,60 @@ sys.path.insert(0, project_root)
 - `sys.path.insert(0, ...)` 确保项目根目录优先搜索
 - 添加了更详细的错误信息，方便调试
 
-### 2. 优化 A800 GPU 配置
+### 2. 修复多GPU设备冲突问题
+
+**修改文件：**
+- [model_config.py](model_config.py)
+
+**修改内容：**
+
+#### a) 移除 `device_map="auto"`
+```python
+# 修改前（会导致多GPU分配）
+load_kwargs = {
+    "device_map": "auto",  # ❌ 会自动分配到多个GPU
+}
+
+# 修改后（使用单GPU）
+load_kwargs = {}  # ✅ 不使用自动设备映射
+```
+
+#### b) 手动控制设备分配
+```python
+# 加载模型到CPU
+print("  正在加载模型到CPU...")
+model = AutoModelForCausalLM.from_pretrained(
+    config['model_name'],
+    **load_kwargs
+)
+
+# 手动将模型移动到指定设备
+device = f"cuda:{device_id}"  # 默认 cuda:0
+print(f"  将模型移动到 {device}...")
+model = model.to(device)
+```
+
+#### c) 添加 device_id 参数
+```python
+def load_model_optimized(model_name: str, device_id=0):
+    """
+    加载模型（针对A800 80GB显存优化）
+
+    Args:
+        model_name: 模型名称 (gpt2-xl, gpt-j-6b, llama3-8b)
+        device_id: GPU设备ID，默认为0（使用单GPU避免多设备问题）
+
+    Returns:
+        model, tokenizer, config
+    """
+```
+
+**优势：**
+- 强制使用单个 GPU，避免多设备冲突
+- 可以通过 `device_id` 参数指定使用哪个 GPU
+- 更清晰的设备分配流程
+
+### 3. 优化 A800 GPU 配置
 
 **修改文件：**
 - [model_config.py](model_config.py)
@@ -80,14 +144,6 @@ A800 有 80GB 显存，足够加载 GPT-J-6B 和 LLaMA-3-8B 的完整精度模�
 - 无需量化，模型精度更高
 - float16/bfloat16 比 int8 量化有更好的表达能力
 - 训练和推理效果可能更好
-
-#### c) 更新函数文档
-```python
-def load_model_optimized(model_name: str):
-    """
-    加载模型（针对A800 80GB显存优化）
-    """
-```
 
 ## 使用说明
 
