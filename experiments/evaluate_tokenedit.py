@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """评估TokenEdit方法 - 支持多个模型"""
 import sys
 import os
