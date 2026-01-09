@@ -42,58 +42,65 @@ def get_model_config(model_name: str):
 
 def load_model_optimized(model_name: str):
     """
-    加载模型（针对A4000优化�?
-    
+    加载模型（针对A4000/A800优化）
+
     Args:
         model_name: 模型名称 (gpt2-xl, gpt-j-6b, llama3-8b)
-    
+
     Returns:
         model, tokenizer, config
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    
+
     config = get_model_config(model_name)
-    
+
     print(f"加载模型: {config['model_name']}")
     print(f"  8bit量化: {config['load_in_8bit']}")
     print(f"  精度: {config['torch_dtype']}")
-    
-    # 加载配置
-    load_kwargs = {
-        "device_map": "auto",  # 自动分配设备
-    }
-    
+
+    # 确定设备
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()  # 清空缓存
+
+    # 加载配置 - 不使用 device_map，手动控制设备
+    load_kwargs = {}
+
     if config['load_in_8bit']:
         # 8bit量化加载（节省显存）
         load_kwargs["load_in_8bit"] = True
-        print("  使用8bit量化以适配A4000显存")
+        print("  使用8bit量化以适配显存")
     else:
         # 正常加载
         if config['torch_dtype'] == "float16":
             load_kwargs["torch_dtype"] = torch.float16
-        
-    # 加载模型
+
+    # 加载模型（先加载到CPU，避免device_map的自动分配问题）
     model = AutoModelForCausalLM.from_pretrained(
         config['model_name'],
         **load_kwargs
     )
-    
+
+    # 手动移动到设备
+    model = model.to(device)
+    model.eval()  # 设置为评估模式
+
     # 加载tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
-    
+
     # 设置pad_token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
-    print(f"�?模型加载完成")
-    print(f"  设备: {model.device}")
-    
+
+    print(f"模型加载完成")
+    print(f"  设备: {device}")
+
     # 显示显存占用
     if torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**3
         reserved = torch.cuda.memory_reserved() / 1024**3
-        print(f"  显存占用: {allocated:.2f}GB (已分�? / {reserved:.2f}GB (已保�?")
-    
+        print(f"  显存占用: {allocated:.2f}GB (已分配) / {reserved:.2f}GB (已保留)")
+
     return model, tokenizer, config
 

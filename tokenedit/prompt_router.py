@@ -48,23 +48,24 @@ class PromptRouter:
     def register_edit(self, edit_id: int, subject: str, relation: str):
         """
         注册编辑
-        
+
         Args:
             edit_id: 编辑ID
             subject: 主体 (e.g., "France")
             relation: 关系 (e.g., "capital")
         """
-        # 1. 计算并存储嵌入
-        text = f"{subject} {relation}"
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        
-        with torch.no_grad():
-            outputs = self.model(**inputs, output_hidden_states=True)
-            # 使用最后一层的平均池化
-            embedding = outputs.hidden_states[-1].mean(dim=1)  # (1, hidden_size)
-        
-        self.edit_embeddings[edit_id] = embedding
-        
+        # 1. 计算并存储嵌入（仅在使用embedding路由时）
+        if self.hparams.use_embedding_routing:
+            text = f"{subject} {relation}"
+            inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs, output_hidden_states=True)
+                # 使用最后一层的平均池化
+                embedding = outputs.hidden_states[-1].mean(dim=1)  # (1, hidden_size)
+
+            self.edit_embeddings[edit_id] = embedding
+
         # 2. 存储信息用于模板匹配
         self.edit_info[edit_id] = {
             "subject": subject,
