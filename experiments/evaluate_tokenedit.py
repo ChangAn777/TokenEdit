@@ -117,7 +117,7 @@ def evaluate(editor, requests):
         'paraphrase': paraphrase
     }
 
-def main(model_name="gpt2-xl", num_samples=10, num_epochs=50):
+def main(model_name="gpt2-xl", num_samples=10, num_epochs=None):
     """
     主评估函数
     
@@ -147,8 +147,11 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=50):
 
     # 如果命令行指定了num_epochs，覆盖配置文件中的值
     if num_epochs is not None:
+        original_epochs = hparams.num_epochs
         hparams.num_epochs = num_epochs
-        print(f"  覆盖 num_epochs 为: {num_epochs}")
+        print(f"  覆盖 num_epochs: {original_epochs} -> {num_epochs}")
+    else:
+        print(f"  使用配置文件的 num_epochs: {hparams.num_epochs}")
 
     # 确保device设置正确
     hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -174,7 +177,7 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=50):
         'method': 'TokenEdit',
         'model': model_name,
         'num_samples': num_samples,
-        'num_epochs': num_epochs,
+        'num_epochs': hparams.num_epochs,  # 使用实际的训练轮数
         'metrics': metrics
     }
     
@@ -194,8 +197,8 @@ if __name__ == "__main__":
                        help='模型名称')
     parser.add_argument('--samples', type=int, default=10,
                        help='编辑样本数')
-    parser.add_argument('--epochs', type=int, default=50,
-                       help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=None,
+                       help='训练轮数（不指定则使用JSON配置文件中的值）')
     
     args = parser.parse_args()
     

@@ -63,8 +63,10 @@ def evaluate_model(model_name: str, requests: list, num_epochs: int = 30):
         # 从JSON文件加载超参数
         hparams = load_hparams_from_json(model_name)
 
-        # 覆盖num_epochs
-        hparams.num_epochs = num_epochs
+        # 如果指定了num_epochs，覆盖配置文件中的值
+        if num_epochs is not None:
+            hparams.num_epochs = num_epochs
+
         hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
         hparams.verbose = False
 
