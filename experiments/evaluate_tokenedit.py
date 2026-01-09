@@ -18,17 +18,17 @@ try:
 except ImportError as e:
     print(f"错误: 无法导入 model_config")
     print(f"Python路径: {sys.path}")
-    print(f"项目根目录: {project_root}")
-    print(f"请确保 model_config.py 在项目根目录下")
+    print(f"项目根目�? {project_root}")
+    print(f"请确�?model_config.py 在项目根目录�?)
     sys.exit(1)
 
 def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
     """
-    从JSON文件加载超参数配置
+    从JSON文件加载超参数配�?
 
     Args:
         model_name: 模型名称
-        hparams_dir: 超参数配置目录
+        hparams_dir: 超参数配置目�?
 
     Returns:
         TokenEditHyperParams对象
@@ -36,18 +36,18 @@ def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdi
     hparams_path = Path(hparams_dir) / f"{model_name}.json"
 
     if not hparams_path.exists():
-        print(f"⚠ 警告: 未找到配置文件 {hparams_path}")
+        print(f"�?警告: 未找到配置文�?{hparams_path}")
         print(f"将使用默认超参数")
         return TokenEditHyperParams(model_name=model_name)
 
-    print(f"✓ 从 {hparams_path} 加载配置")
+    print(f"�?�?{hparams_path} 加载配置")
 
     with open(hparams_path, 'r') as f:
         config = json.load(f)
 
     # 打印关键配置
     print(f"  配置参数:")
-    print(f"    - target_layers: {config.get('target_layers', '未设置')}")
+    print(f"    - target_layers: {config.get('target_layers', '未设�?)}")
     print(f"    - num_epochs: {config.get('num_epochs', 100)}")
     print(f"    - learning_rate: {config.get('learning_rate', 0.001)}")
     print(f"    - w_edit: {config.get('w_edit', 1.0)}")
@@ -81,7 +81,7 @@ def load_data(num_samples=10):
 
 def evaluate(editor, requests):
     """评估指标"""
-    print("\n评估中...")
+    print("\n评估�?..")
     
     # Efficacy
     correct = 0
@@ -94,7 +94,7 @@ def evaluate(editor, requests):
             print(f"推理错误: {e}")
     
     efficacy = correct / len(requests)
-    print(f"✓ 编辑成功率: {efficacy:.2%}")
+    print(f"�?编辑成功�? {efficacy:.2%}")
     
     # Paraphrase
     para_correct = 0
@@ -110,7 +110,7 @@ def evaluate(editor, requests):
                 print(f"推理错误: {e}")
     
     paraphrase = para_correct / para_total if para_total > 0 else 0.0
-    print(f"✓ 泛化能力: {paraphrase:.2%}")
+    print(f"�?泛化能力: {paraphrase:.2%}")
     
     return {
         'efficacy': efficacy,
@@ -119,11 +119,11 @@ def evaluate(editor, requests):
 
 def main(model_name="gpt2-xl", num_samples=10, num_epochs=None):
     """
-    主评估函数
+    主评估函�?
     
     Args:
         model_name: 模型名称
-        num_samples: 编辑样本数
+        num_samples: 编辑样本�?
         num_epochs: 训练轮数
     """
     print("="*70)
@@ -137,25 +137,25 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=None):
     # 加载数据
     print("\n[2/4] 加载数据...")
     requests = load_data(num_samples)
-    print(f"✓ 已加载 {len(requests)} 个编辑样本")
+    print(f"�?已加�?{len(requests)} 个编辑样�?)
     
-    # 创建编辑器
-    print("\n[3/4] 创建编辑器...")
+    # 创建编辑�?
+    print("\n[3/4] 创建编辑�?..")
 
-    # 从JSON文件加载超参数（如果存在），否则使用默认值
+    # 从JSON文件加载超参数（如果存在），否则使用默认�?
     hparams = load_hparams_from_json(model_name)
 
-    # 如果命令行指定了num_epochs，覆盖配置文件中的值
+    # 如果命令行指定了num_epochs，覆盖配置文件中的�?
     if num_epochs is not None:
         original_epochs = hparams.num_epochs
         hparams.num_epochs = num_epochs
         print(f"  覆盖 num_epochs: {original_epochs} -> {num_epochs}")
     else:
-        print(f"  使用配置文件的 num_epochs: {hparams.num_epochs}")
+        print(f"  使用配置文件�?num_epochs: {hparams.num_epochs}")
 
     # 确保device设置正确
     hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
-    hparams.verbose = False  # 评估时减少输出
+    hparams.verbose = True  # 评估时减少输�?
 
     editor = TokenEditEditor(model, tokenizer, hparams)
     
@@ -165,7 +165,7 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=None):
         editor.apply_edits(requests)
     except RuntimeError as e:
         if "out of memory" in str(e):
-            print("\n❌ 显存不足！尝试减少样本数或轮数")
+            print("\n�?显存不足！尝试减少样本数或轮�?)
             return
         raise
     
@@ -177,7 +177,7 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=None):
         'method': 'TokenEdit',
         'model': model_name,
         'num_samples': num_samples,
-        'num_epochs': hparams.num_epochs,  # 使用实际的训练轮数
+        'num_epochs': hparams.num_epochs,  # 使用实际的训练轮�?
         'metrics': metrics
     }
     
@@ -186,7 +186,7 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=None):
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    print(f"\n✓ 评估完成！结果已保存到: {results_file}")
+    print(f"\n�?评估完成！结果已保存�? {results_file}")
 
 if __name__ == "__main__":
     import argparse
@@ -196,7 +196,7 @@ if __name__ == "__main__":
                        choices=['gpt2-xl', 'gpt-j-6b', 'llama3-8b'],
                        help='模型名称')
     parser.add_argument('--samples', type=int, default=10,
-                       help='编辑样本数')
+                       help='编辑样本�?)
     parser.add_argument('--epochs', type=int, default=None,
                        help='训练轮数（不指定则使用JSON配置文件中的值）')
     
