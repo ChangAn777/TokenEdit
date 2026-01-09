@@ -1,7 +1,7 @@
 """
 模型配置文件
 支持: gpt2-xl, gpt-j-6b, llama3-8b
-针对A4000 (16GB)优化
+针对A800 (80GB)优化 - 无需量化，可以使用float16/bfloat16
 """
 
 MODEL_CONFIGS = {
@@ -9,8 +9,8 @@ MODEL_CONFIGS = {
         "model_name": "gpt2-xl",
         "hidden_size": 1600,
         "num_layers": 48,
-        "target_layers": [13, 14, 15, 16, 17],  # 中间1/3层
-        "load_in_8bit": False,  # 1.5B参数，A4000可以直接加载
+        "target_layers": [15, 16, 17, 18, 19, 20, 21, 22, 23, 24],  # 中间1/3层
+        "load_in_8bit": False,  # A800显存充足，无需量化
         "torch_dtype": "float32",
         "memory_efficient": False,
     },
@@ -18,19 +18,19 @@ MODEL_CONFIGS = {
         "model_name": "EleutherAI/gpt-j-6b",
         "hidden_size": 4096,
         "num_layers": 28,
-        "target_layers": [3, 4, 5, 6, 7, 8],
-        "load_in_8bit": True,  # 6B参数，需?bit量化才能装入A4000
-        "torch_dtype": "float16",
-        "memory_efficient": True,
+        "target_layers": [9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+        "load_in_8bit": False,  # A800 80GB显存，可以不用量化
+        "torch_dtype": "float16",  # 使用float16以获得更好性能
+        "memory_efficient": False,
     },
     "llama3-8b": {
         "model_name": "meta-llama/Meta-Llama-3-8B",  # 或使用HF镜像路径
         "hidden_size": 4096,
         "num_layers": 32,
-        "target_layers": [4, 5, 6, 7, 8],
-        "load_in_8bit": True,  # 8B参数，必�?bit量化
-        "torch_dtype": "float16",
-        "memory_efficient": True,
+        "target_layers": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+        "load_in_8bit": False,  # A800 80GB显存，可以不用量化
+        "torch_dtype": "float16",  # 使用float16以获得更好性能
+        "memory_efficient": False,
     },
 }
 
@@ -42,7 +42,7 @@ def get_model_config(model_name: str):
 
 def load_model_optimized(model_name: str):
     """
-    加载模型（针对A4000/A800优化）
+    加载模型（针对A800 80GB显存优化）
 
     Args:
         model_name: 模型名称 (gpt2-xl, gpt-j-6b, llama3-8b)
@@ -59,32 +59,27 @@ def load_model_optimized(model_name: str):
     print(f"  8bit量化: {config['load_in_8bit']}")
     print(f"  精度: {config['torch_dtype']}")
 
-    # 确定设备
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()  # 清空缓存
-
-    # 加载配置 - 不使用 device_map，手动控制设备
-    load_kwargs = {}
+    # 加载配置
+    load_kwargs = {
+        "device_map": "auto",  # 自动分配设备
+    }
 
     if config['load_in_8bit']:
         # 8bit量化加载（节省显存）
         load_kwargs["load_in_8bit"] = True
-        print("  使用8bit量化以适配显存")
+        print("  使用8bit量化以节省显存")
     else:
-        # 正常加载
+        # 正常加载（A800显存充足，使用更高精度）
         if config['torch_dtype'] == "float16":
             load_kwargs["torch_dtype"] = torch.float16
+        elif config['torch_dtype'] == "bfloat16":
+            load_kwargs["torch_dtype"] = torch.bfloat16
 
-    # 加载模型（先加载到CPU，避免device_map的自动分配问题）
+    # 加载模型
     model = AutoModelForCausalLM.from_pretrained(
         config['model_name'],
         **load_kwargs
     )
-
-    # 手动移动到设备
-    model = model.to(device)
-    model.eval()  # 设置为评估模式
 
     # 加载tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
@@ -93,8 +88,8 @@ def load_model_optimized(model_name: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"模型加载完成")
-    print(f"  设备: {device}")
+    print(f"✓ 模型加载完成")
+    print(f"  设备: {model.device}")
 
     # 显示显存占用
     if torch.cuda.is_available():
@@ -103,4 +98,3 @@ def load_model_optimized(model_name: str):
         print(f"  显存占用: {allocated:.2f}GB (已分配) / {reserved:.2f}GB (已保留)")
 
     return model, tokenizer, config
-

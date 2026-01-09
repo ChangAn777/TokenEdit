@@ -1,6 +1,11 @@
 """评估TokenEdit方法 - 支持多个模型"""
 import sys
-sys.path.append('..')
+import os
+
+# 添加项目根目录到Python路径
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.insert(0, project_root)
 
 import torch
 import json
@@ -10,9 +15,11 @@ from tokenedit import TokenEditEditor, TokenEditHyperParams
 
 try:
     from model_config import load_model_optimized, get_model_config
-except ImportError:
-    print("错误: model_config.py 未找到")
-    print("请运行: python generate_experiment_files.py")
+except ImportError as e:
+    print(f"错误: 无法导入 model_config")
+    print(f"Python路径: {sys.path}")
+    print(f"项目根目录: {project_root}")
+    print(f"请确保 model_config.py 在项目根目录下")
     sys.exit(1)
 
 def load_data(num_samples=10):

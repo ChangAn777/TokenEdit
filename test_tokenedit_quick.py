@@ -62,19 +62,12 @@ def main(model_name="gpt2-xl"):
         print("\n" + "="*70)
         print("测试推理")
         print("="*70)
-
-        test_prompts = [
-            "The capital of France is",
-            "France is in",
-            "What is the capital of France?",
-            "France's capital city is"
-        ]
-
-        for prompt in test_prompts:
+        
+        for prompt in ["The capital of France is", "France is in"]:
             print(f"\n输入: {prompt}")
-            output = editor.inference(prompt, max_new_tokens=10)
+            output = editor.inference(prompt, max_new_tokens=5)
             print(f"输出: {output}")
-
+        
         print("\n✓ 快速测试完成！")
         
     except RuntimeError as e:
