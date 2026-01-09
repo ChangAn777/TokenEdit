@@ -22,6 +22,40 @@ except ImportError as e:
     print(f"请确保 model_config.py 在项目根目录下")
     sys.exit(1)
 
+def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
+    """
+    从JSON文件加载超参数配置
+
+    Args:
+        model_name: 模型名称
+        hparams_dir: 超参数配置目录
+
+    Returns:
+        TokenEditHyperParams对象
+    """
+    hparams_path = Path(hparams_dir) / f"{model_name}.json"
+
+    if not hparams_path.exists():
+        print(f"⚠ 警告: 未找到配置文件 {hparams_path}")
+        print(f"将使用默认超参数")
+        return TokenEditHyperParams(model_name=model_name)
+
+    print(f"✓ 从 {hparams_path} 加载配置")
+
+    with open(hparams_path, 'r') as f:
+        config = json.load(f)
+
+    # 打印关键配置
+    print(f"  配置参数:")
+    print(f"    - target_layers: {config.get('target_layers', '未设置')}")
+    print(f"    - num_epochs: {config.get('num_epochs', 100)}")
+    print(f"    - learning_rate: {config.get('learning_rate', 0.001)}")
+    print(f"    - w_edit: {config.get('w_edit', 1.0)}")
+    print(f"    - w_suppress: {config.get('w_suppress', 0.5)}")
+
+    # 创建TokenEditHyperParams对象
+    return TokenEditHyperParams(**config)
+
 def load_data(num_samples=10):
     """加载数据"""
     data_path = Path("data/sample_data.json")
@@ -98,7 +132,7 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=50):
     
     # 加载模型
     print("\n[1/4] 加载模型...")
-    model, tokenizer, config = load_model_optimized(model_name)
+    model, tokenizer, _ = load_model_optimized(model_name)
     
     # 加载数据
     print("\n[2/4] 加载数据...")
@@ -107,15 +141,19 @@ def main(model_name="gpt2-xl", num_samples=10, num_epochs=50):
     
     # 创建编辑器
     print("\n[3/4] 创建编辑器...")
-    hparams = TokenEditHyperParams(
-        model_name=model_name,
-        num_epochs=num_epochs,
-        learning_rate=0.001,
-        target_layers=config['target_layers'],
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        verbose=False
-    )
-    
+
+    # 从JSON文件加载超参数（如果存在），否则使用默认值
+    hparams = load_hparams_from_json(model_name)
+
+    # 如果命令行指定了num_epochs，覆盖配置文件中的值
+    if num_epochs is not None:
+        hparams.num_epochs = num_epochs
+        print(f"  覆盖 num_epochs 为: {num_epochs}")
+
+    # 确保device设置正确
+    hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
+    hparams.verbose = False  # 评估时减少输出
+
     editor = TokenEditEditor(model, tokenizer, hparams)
     
     # 应用编辑

@@ -17,6 +17,24 @@ but found at least two devices, cuda:1 and cuda:0!
 **原因分析：**
 使用 `device_map="auto"` 时，accelerate 库会自动将模型分配到多个 GPU，导致张量在不同设备上，计算时出现设备不匹配错误。
 
+### 问题 3：未使用正确的超参数配置 ⚠️ **最重要！**
+```
+编辑成功率: 50%
+泛化能力: 25%
+```
+
+**原因分析：**
+实验代码**没有加载** `hparams/TokenEdit/gpt2-xl.json` 配置文件，而是使用硬编码的错误参数：
+
+| 参数 | JSON配置值 | 代码使用的值 | 影响 |
+|------|-----------|-------------|------|
+| `learning_rate` | `0.1` | `0.001` | ❌ 差了100倍，导致训练几乎无效 |
+| `num_epochs` | `150` | `50` | ❌ 训练不足 |
+| `target_layers` | `[13,14,15,16,17]` | `[15-24]` | ❌ 层数不匹配 |
+| `w_edit` | `1.5` | `1.0` (默认) | ❌ 编辑权重不足 |
+| `w_suppress` | `0.5` | `0.5` (默认) | ✅ 正确 |
+| `w_ortho` | `0.1` | `0.3` (默认) | ❌ 正交约束过强 |
+
 ## 修复内容
 
 ### 1. 修复导入路径问题
@@ -145,6 +163,69 @@ A800 有 80GB 显存，足够加载 GPT-J-6B 和 LLaMA-3-8B 的完整精度模�
 - float16/bfloat16 比 int8 量化有更好的表达能力
 - 训练和推理效果可能更好
 
+### 4. 修复超参数加载问题 ⭐ **核心修复**
+
+**修改文件：**
+- [experiments/evaluate_tokenedit.py](experiments/evaluate_tokenedit.py)
+- [experiments/evaluate_all.py](experiments/evaluate_all.py)
+
+**修改内容：**
+
+#### a) 添加 `load_hparams_from_json` 函数
+```python
+def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
+    """从JSON文件加载超参数配置"""
+    hparams_path = Path(hparams_dir) / f"{model_name}.json"
+
+    if not hparams_path.exists():
+        print(f"⚠ 警告: 未找到配置文件 {hparams_path}，使用默认值")
+        return TokenEditHyperParams(model_name=model_name)
+
+    print(f"✓ 从 {hparams_path} 加载配置")
+
+    with open(hparams_path, 'r') as f:
+        config = json.load(f)
+
+    # 打印关键配置
+    print(f"  配置参数:")
+    print(f"    - target_layers: {config.get('target_layers', '未设置')}")
+    print(f"    - num_epochs: {config.get('num_epochs', 100)}")
+    print(f"    - learning_rate: {config.get('learning_rate', 0.001)}")
+
+    return TokenEditHyperParams(**config)
+```
+
+#### b) 修改编辑器创建代码
+```python
+# ❌ 修改前（硬编码错误参数）
+hparams = TokenEditHyperParams(
+    model_name=model_name,
+    num_epochs=num_epochs,
+    learning_rate=0.001,  # 错误！应该是 0.1
+    target_layers=config['target_layers'],
+    device="cuda" if torch.cuda.is_available() else "cpu",
+    verbose=False
+)
+
+# ✅ 修改后（从JSON加载正确参数）
+hparams = load_hparams_from_json(model_name)
+
+# 如果命令行指定了num_epochs，覆盖配置文件中的值
+if num_epochs is not None:
+    hparams.num_epochs = num_epochs
+    print(f"  覆盖 num_epochs 为: {num_epochs}")
+
+hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
+hparams.verbose = False
+```
+
+**优势：**
+- ✅ 使用正确的学习率（0.1 而不是 0.001）
+- ✅ 使用正确的训练轮数（150 而不是 50）
+- ✅ 使用正确的目标层（[13-17] 而不是 [15-24]）
+- ✅ 使用正确的损失权重
+- ✅ 可以通过修改 JSON 文件快速调整参数
+
 ## 使用说明
 
 ### 在远程服务器上运行
@@ -155,6 +236,7 @@ A800 有 80GB 显存，足够加载 GPT-J-6B 和 LLaMA-3-8B 的完整精度模�
    - experiments/evaluate_tokenedit.py
    - experiments/evaluate_all.py
    - model_config.py
+   - hparams/TokenEdit/gpt2-xl.json  # 确保配置文件存在
    ```
 
 2. **准备数据**（如果还没有）：
@@ -164,9 +246,47 @@ A800 有 80GB 显存，足够加载 GPT-J-6B 和 LLaMA-3-8B 的完整精度模�
 
 3. **运行评估**：
    ```bash
-   # 快速测试
-   python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 20 --epochs 50
+   # 使用配置文件中的参数（learning_rate=0.1, num_epochs=150）
+   python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 20
+
+   # 如果想覆盖训练轮数
+   python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 20 --epochs 100
    ```
+
+4. **查看输出**：
+   ```
+   ✓ 从 hparams/TokenEdit/gpt2-xl.json 加载配置
+     配置参数:
+       - target_layers: [13, 14, 15, 16, 17]
+       - num_epochs: 150
+       - learning_rate: 0.1
+       - w_edit: 1.5
+       - w_suppress: 0.5
+   ```
+
+### 预期效果改善
+
+使用正确的参数后，预期指标会大幅提升：
+
+| 指标 | 之前（错误参数） | 预期（正确参数） |
+|------|----------------|----------------|
+| 编辑成功率 | 50% | **80-95%** |
+| 泛化能力 | 25% | **70-90%** |
+
+### 调整超参数
+
+如果效果仍不理想，可以编辑 `hparams/TokenEdit/gpt2-xl.json`：
+
+```json
+{
+  "learning_rate": 0.1,      // 尝试 0.05 - 0.2
+  "num_epochs": 150,          // 尝试 100 - 200
+  "w_edit": 1.5,             // 编辑损失权重
+  "w_suppress": 0.5,         // 抑制损失权重
+  "w_ortho": 0.1,            // 正交约束权重
+  "target_layers": [13, 14, 15, 16, 17]
+}
+```
 
 ### 预期显存占用（A800）
 

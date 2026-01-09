@@ -14,12 +14,25 @@ import torch
 from tokenedit import TokenEditEditor, TokenEditHyperParams
 
 try:
-    from model_config import load_model_optimized, get_model_config, MODEL_CONFIGS
+    from model_config import load_model_optimized, MODEL_CONFIGS
 except ImportError as e:
     print(f"错误: 无法导入 model_config")
     print(f"Python路径: {sys.path}")
     print(f"项目根目录: {project_root}")
     sys.exit(1)
+
+def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
+    """从JSON文件加载超参数配置"""
+    hparams_path = Path(hparams_dir) / f"{model_name}.json"
+
+    if not hparams_path.exists():
+        print(f"⚠ 警告: 未找到配置文件 {hparams_path}，使用默认值")
+        return TokenEditHyperParams(model_name=model_name)
+
+    with open(hparams_path, 'r') as f:
+        config = json.load(f)
+
+    return TokenEditHyperParams(**config)
 
 def load_data(num_samples=10):
     """加载数据"""
@@ -45,16 +58,16 @@ def evaluate_model(model_name: str, requests: list, num_epochs: int = 30):
     
     try:
         # 加载模型
-        model, tokenizer, config = load_model_optimized(model_name)
-        
-        # 创建编辑器
-        hparams = TokenEditHyperParams(
-            model_name=model_name,
-            num_epochs=num_epochs,
-            target_layers=config['target_layers'],
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            verbose=False
-        )
+        model, tokenizer, _ = load_model_optimized(model_name)
+
+        # 从JSON文件加载超参数
+        hparams = load_hparams_from_json(model_name)
+
+        # 覆盖num_epochs
+        hparams.num_epochs = num_epochs
+        hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
+        hparams.verbose = False
+
         editor = TokenEditEditor(model, tokenizer, hparams)
         
         # 应用编辑
