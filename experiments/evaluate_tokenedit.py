@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""评估TokenEdit方法 - 支持多个模型"""
+"""Evaluate TokenEdit method - support multiple models"""
 import sys
 import os
 
-# 添加项目根目录到Python路径
+# Add project root to Python path
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(script_dir)
 sys.path.insert(0, project_root)
@@ -15,57 +15,55 @@ from tqdm import tqdm
 from tokenedit import TokenEditEditor, TokenEditHyperParams
 
 try:
-    from model_config import load_model_optimized, get_model_config
+    from model_config import load_model_optimized
 except ImportError as e:
-    print(f"错误: 无法导入 model_config")
-    print(f"Python路径: {sys.path}")
-    print(f"项目根目�? {project_root}")
-    print(f"请确�?model_config.py 在项目根目录�?)
+    print(f"Error: Cannot import model_config")
+    print(f"Python path: {sys.path}")
+    print(f"Project root: {project_root}")
+    print(f"Please ensure model_config.py is in project root")
     sys.exit(1)
 
 def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
     """
-    从JSON文件加载超参数配�?
+    Load hyperparameters from JSON file
 
     Args:
-        model_name: 模型名称
-        hparams_dir: 超参数配置目�?
+        model_name: Model name
+        hparams_dir: Directory containing JSON config files
 
     Returns:
-        TokenEditHyperParams对象
+        TokenEditHyperParams object
     """
     hparams_path = Path(hparams_dir) / f"{model_name}.json"
 
     if not hparams_path.exists():
-        print(f"�?警告: 未找到配置文�?{hparams_path}")
-        print(f"将使用默认超参数")
+        print(f"Warning: Config file not found {hparams_path}, using default values")
         return TokenEditHyperParams(model_name=model_name)
 
-    print(f"�?�?{hparams_path} 加载配置")
+    print(f"Loading config from {hparams_path}")
 
-    with open(hparams_path, 'r') as f:
+    with open(hparams_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
-    # 打印关键配置
-    print(f"  配置参数:")
-    print(f"    - target_layers: {config.get('target_layers', '未设�?)}")
+    # Print key configuration
+    print(f"  Config parameters:")
+    print(f"    - target_layers: {config.get('target_layers', 'not set')}")
     print(f"    - num_epochs: {config.get('num_epochs', 100)}")
     print(f"    - learning_rate: {config.get('learning_rate', 0.001)}")
     print(f"    - w_edit: {config.get('w_edit', 1.0)}")
     print(f"    - w_suppress: {config.get('w_suppress', 0.5)}")
 
-    # 创建TokenEditHyperParams对象
     return TokenEditHyperParams(**config)
 
 def load_data(num_samples=10):
-    """加载数据"""
+    """Load data"""
     data_path = Path("data/sample_data.json")
     if not data_path.exists():
         data_path = Path("data/counterfact.json")
-    
-    with open(data_path) as f:
+
+    with open(data_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     requests = []
     for item in data[:num_samples]:
         req = item['requested_rewrite']
@@ -81,9 +79,9 @@ def load_data(num_samples=10):
     return requests
 
 def evaluate(editor, requests):
-    """评估指标"""
-    print("\n评估�?..")
-    
+    """Evaluate metrics"""
+    print("\nEvaluating...")
+
     # Efficacy
     correct = 0
     for req in tqdm(requests, desc="Efficacy"):
@@ -92,15 +90,15 @@ def evaluate(editor, requests):
             if req['target_new'].lower() in output.lower():
                 correct += 1
         except Exception as e:
-            print(f"推理错误: {e}")
-    
+            print(f"Inference error: {e}")
+
     efficacy = correct / len(requests)
-    print(f"�?编辑成功�? {efficacy:.2%}")
-    
+    print(f"Edit success rate: {efficacy:.2%}")
+
     # Paraphrase
     para_correct = 0
     para_total = 0
-    for req in tqdm(requests[:5], desc="Paraphrase"):  # 只测试前5个以节省时间
+    for req in tqdm(requests[:5], desc="Paraphrase"):
         for para in req.get('paraphrase_prompts', [])[:2]:
             try:
                 output = editor.inference(para, max_new_tokens=5)
@@ -108,11 +106,11 @@ def evaluate(editor, requests):
                     para_correct += 1
                 para_total += 1
             except Exception as e:
-                print(f"推理错误: {e}")
-    
+                print(f"Inference error: {e}")
+
     paraphrase = para_correct / para_total if para_total > 0 else 0.0
-    print(f"�?泛化能力: {paraphrase:.2%}")
-    
+    print(f"Generalization: {paraphrase:.2%}")
+
     return {
         'efficacy': efficacy,
         'paraphrase': paraphrase
@@ -120,87 +118,84 @@ def evaluate(editor, requests):
 
 def main(model_name="gpt2-xl", num_samples=10, num_epochs=None):
     """
-    主评估函�?
-    
+    Main evaluation function
+
     Args:
-        model_name: 模型名称
-        num_samples: 编辑样本�?
-        num_epochs: 训练轮数
+        model_name: Model name
+        num_samples: Number of edit samples
+        num_epochs: Number of training epochs (None to use JSON config)
     """
     print("="*70)
-    print(f"TokenEdit 评估实验 - {model_name}")
+    print(f"TokenEdit Evaluation - {model_name}")
     print("="*70)
-    
-    # 加载模型
-    print("\n[1/4] 加载模型...")
-    model, tokenizer, _ = load_model_optimized(model_name)
-    
-    # 加载数据
-    print("\n[2/4] 加载数据...")
-    requests = load_data(num_samples)
-    print(f"�?已加�?{len(requests)} 个编辑样�?)
-    
-    # 创建编辑�?
-    print("\n[3/4] 创建编辑�?..")
 
-    # 从JSON文件加载超参数（如果存在），否则使用默认�?
+    # Load model
+    print("\n[1/4] Loading model...")
+    model, tokenizer, _ = load_model_optimized(model_name)
+
+    # Load data
+    print("\n[2/4] Loading data...")
+    requests = load_data(num_samples)
+    print(f"Loaded {len(requests)} edit samples")
+
+    # Create editor
+    print("\n[3/4] Creating editor...")
+
+    # Load hyperparameters from JSON file
     hparams = load_hparams_from_json(model_name)
 
-    # 如果命令行指定了num_epochs，覆盖配置文件中的�?
+    # Override num_epochs if specified via command line
     if num_epochs is not None:
-        original_epochs = hparams.num_epochs
+        print(f"  Overriding num_epochs: {hparams.num_epochs} -> {num_epochs}")
         hparams.num_epochs = num_epochs
-        print(f"  覆盖 num_epochs: {original_epochs} -> {num_epochs}")
-    else:
-        print(f"  使用配置文件�?num_epochs: {hparams.num_epochs}")
 
-    # 确保device设置正确
+    # Set device
     hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
-    hparams.verbose = True  # 评估时减少输�?
+    hparams.verbose = False
 
     editor = TokenEditEditor(model, tokenizer, hparams)
-    
-    # 应用编辑
-    print("\n[4/4] 应用编辑...")
+
+    # Apply edits
+    print("\n[4/4] Applying edits...")
     try:
         editor.apply_edits(requests)
     except RuntimeError as e:
         if "out of memory" in str(e):
-            print("\n�?显存不足！尝试减少样本数或轮�?)
+            print("\nOut of memory! Try reducing samples or epochs")
             return
         raise
-    
-    # 评估
+
+    # Evaluate
     metrics = evaluate(editor, requests)
-    
-    # 保存结果
+
+    # Save results
     results = {
         'method': 'TokenEdit',
         'model': model_name,
         'num_samples': num_samples,
-        'num_epochs': hparams.num_epochs,  # 使用实际的训练轮�?
+        'num_epochs': hparams.num_epochs,
         'metrics': metrics
     }
-    
+
     Path("results").mkdir(exist_ok=True)
     results_file = f"results/tokenedit_{model_name.replace('/', '_')}.json"
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    print(f"\n�?评估完成！结果已保存�? {results_file}")
+    with open(results_file, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+
+    print(f"\nEvaluation complete! Results saved to: {results_file}")
 
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser()
+
+    parser = argparse.ArgumentParser(description="Evaluate TokenEdit method")
     parser.add_argument('--model', type=str, default='gpt2-xl',
                        choices=['gpt2-xl', 'gpt-j-6b', 'llama3-8b'],
-                       help='模型名称')
+                       help='Model name')
     parser.add_argument('--samples', type=int, default=10,
-                       help='编辑样本�?)
+                       help='Number of edit samples')
     parser.add_argument('--epochs', type=int, default=None,
-                       help='训练轮数（不指定则使用JSON配置文件中的值）')
-    
+                       help='Number of training epochs (default: use JSON config)')
+
     args = parser.parse_args()
-    
+
     main(args.model, args.samples, args.epochs)
