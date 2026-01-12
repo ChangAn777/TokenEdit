@@ -252,109 +252,121 @@ class TokenEditEditor:
             }
         }
         
-        # 训练循环
+        # 训练循环 - 优化版：批量处理 prompts
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
             epoch_breakdown = {k: 0.0 for k in stats['loss_breakdown'].keys()}
-            
+
+            # 收集所有需要训练的 prompts
+            all_training_samples = []
+
             for data in train_data:
                 edit_id = data['edit_id']
                 closure = data['closure']
 
-                # Process prompts_forward (should output target_new)
+                # 收集 forward prompts
                 for prompt in closure.get('prompts_forward', []):
-                    losses = self._compute_sample_loss(
-                        edit_id,
-                        prompt,
-                        'forward',
-                        closure
-                    )
+                    all_training_samples.append({
+                        'edit_id': edit_id,
+                        'prompt': prompt,
+                        'type': 'forward',
+                        'closure': closure
+                    })
 
-                    # Total loss - 确保所有损失都是 Tensor
-                    edit_loss = losses.get('edit', torch.tensor(0.0, device=self.device))
-                    suppress_loss = losses.get('suppress', torch.tensor(0.0, device=self.device))
-                    ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
-
-                    # 确保是 Tensor 类型
-                    if not isinstance(edit_loss, torch.Tensor):
-                        edit_loss = torch.tensor(0.0, device=self.device)
-                    if not isinstance(suppress_loss, torch.Tensor):
-                        suppress_loss = torch.tensor(0.0, device=self.device)
-                    if not isinstance(ortho_loss, torch.Tensor):
-                        ortho_loss = torch.tensor(0.0, device=self.device)
-
-                    total_loss = (
-                        self.hparams.w_edit * edit_loss +
-                        self.hparams.w_suppress * suppress_loss +
-                        self.hparams.w_ortho * ortho_loss
-                    )
-
-                    # 只有当 total_loss 确实需要梯度时才反向传播
-                    if isinstance(total_loss, torch.Tensor) and total_loss.requires_grad:
-                        # Backprop
-                        optimizer.zero_grad()
-                        total_loss.backward()
-
-                        # Gradient clipping
-                        torch.nn.utils.clip_grad_norm_(
-                            self.edit_module.parameters(),
-                            self.hparams.gradient_clip
-                        )
-
-                        optimizer.step()
-
-                        # Stats
-                        epoch_loss += total_loss.item()
-                        epoch_breakdown['edit'] += edit_loss.item() if isinstance(edit_loss, torch.Tensor) else 0.0
-                        epoch_breakdown['suppress'] += suppress_loss.item() if isinstance(suppress_loss, torch.Tensor) else 0.0
-                        epoch_breakdown['ortho'] += ortho_loss.item() if isinstance(ortho_loss, torch.Tensor) else 0.0
-
-                # Process prompts_backward (neighborhood - should keep original)
-                # Skip if no backward prompts exist
-                if not closure.get('prompts_backward', []):
-                    continue
-
+                # 收集 backward prompts
                 for prompt in closure.get('prompts_backward', []):
+                    all_training_samples.append({
+                        'edit_id': edit_id,
+                        'prompt': prompt,
+                        'type': 'backward',
+                        'closure': closure
+                    })
+
+            # 批量处理（如果样本数太多，可以分批）
+            batch_size = 50  # 每次处理 50 个 prompts
+            for batch_start in range(0, len(all_training_samples), batch_size):
+                batch_end = min(batch_start + batch_size, len(all_training_samples))
+                batch_samples = all_training_samples[batch_start:batch_end]
+
+                # 计算这个 batch 的总梯度
+                optimizer.zero_grad()
+                batch_loss = 0.0
+
+                for sample in batch_samples:
+                    edit_id = sample['edit_id']
+                    prompt = sample['prompt']
+                    sample_type = sample['type']
+                    closure = sample['closure']
+
                     losses = self._compute_sample_loss(
-                        edit_id,
-                        prompt,
-                        'backward',
-                        closure
+                        edit_id, prompt, sample_type, closure
                     )
 
-                    # For backward, use both locality and ortho loss - 确保是 Tensor
-                    local_loss = losses.get('local', torch.tensor(0.0, device=self.device))
-                    ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
+                    # 根据类型组合损失
+                    if sample_type == 'forward':
+                        edit_loss = losses.get('edit', torch.tensor(0.0, device=self.device))
+                        suppress_loss = losses.get('suppress', torch.tensor(0.0, device=self.device))
+                        ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
 
-                    # 确保是 Tensor 类型
-                    if not isinstance(local_loss, torch.Tensor):
-                        local_loss = torch.tensor(0.0, device=self.device)
-                    if not isinstance(ortho_loss, torch.Tensor):
-                        ortho_loss = torch.tensor(0.0, device=self.device)
+                        if not isinstance(edit_loss, torch.Tensor):
+                            edit_loss = torch.tensor(0.0, device=self.device)
+                        if not isinstance(suppress_loss, torch.Tensor):
+                            suppress_loss = torch.tensor(0.0, device=self.device)
+                        if not isinstance(ortho_loss, torch.Tensor):
+                            ortho_loss = torch.tensor(0.0, device=self.device)
 
-                    total_loss = (
-                        self.hparams.w_local * local_loss +
-                        self.hparams.w_ortho * ortho_loss
-                    )
-
-                    # 只有当 total_loss 确实需要梯度时才反向传播
-                    if isinstance(total_loss, torch.Tensor) and total_loss.requires_grad:
-                        # Backprop
-                        optimizer.zero_grad()
-                        total_loss.backward()
-
-                        # Gradient clipping
-                        torch.nn.utils.clip_grad_norm_(
-                            self.edit_module.parameters(),
-                            self.hparams.gradient_clip
+                        sample_loss = (
+                            self.hparams.w_edit * edit_loss +
+                            self.hparams.w_suppress * suppress_loss +
+                            self.hparams.w_ortho * ortho_loss
                         )
 
-                        optimizer.step()
+                        # Stats
+                        epoch_loss += sample_loss.item() if isinstance(sample_loss, torch.Tensor) else 0.0
+                        if isinstance(edit_loss, torch.Tensor):
+                            epoch_breakdown['edit'] += edit_loss.item()
+                        if isinstance(suppress_loss, torch.Tensor):
+                            epoch_breakdown['suppress'] += suppress_loss.item()
+                        if isinstance(ortho_loss, torch.Tensor):
+                            epoch_breakdown['ortho'] += ortho_loss.item()
+                    else:  # backward
+                        local_loss = losses.get('local', torch.tensor(0.0, device=self.device))
+                        ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
+
+                        if not isinstance(local_loss, torch.Tensor):
+                            local_loss = torch.tensor(0.0, device=self.device)
+                        if not isinstance(ortho_loss, torch.Tensor):
+                            ortho_loss = torch.tensor(0.0, device=self.device)
+
+                        sample_loss = (
+                            self.hparams.w_local * local_loss +
+                            self.hparams.w_ortho * ortho_loss
+                        )
 
                         # Stats
-                        epoch_loss += total_loss.item()
-                        epoch_breakdown['local'] += local_loss.item() if isinstance(local_loss, torch.Tensor) else 0.0
-                        epoch_breakdown['ortho'] += ortho_loss.item() if isinstance(ortho_loss, torch.Tensor) else 0.0
+                        epoch_loss += sample_loss.item() if isinstance(sample_loss, torch.Tensor) else 0.0
+                        if isinstance(local_loss, torch.Tensor):
+                            epoch_breakdown['local'] += local_loss.item()
+                        if isinstance(ortho_loss, torch.Tensor):
+                            epoch_breakdown['ortho'] += ortho_loss.item()
+
+                    # 累加到 batch loss
+                    if isinstance(sample_loss, torch.Tensor) and sample_loss.requires_grad:
+                        batch_loss = batch_loss + sample_loss if isinstance(batch_loss, torch.Tensor) else sample_loss
+
+                # 对 batch 损失进行一次反向传播和更新
+                if isinstance(batch_loss, torch.Tensor) and batch_loss.requires_grad and batch_loss > 0:
+                    # 平均损失
+                    batch_loss = batch_loss / len(batch_samples)
+                    batch_loss.backward()
+
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(
+                        self.edit_module.parameters(),
+                        self.hparams.gradient_clip
+                    )
+
+                    optimizer.step()
 
             # 更新学习率
             if scheduler is not None:
