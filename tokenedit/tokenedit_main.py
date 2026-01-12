@@ -277,23 +277,26 @@ class TokenEditEditor:
                         self.hparams.w_ortho * losses.get('ortho', 0)
                     )
 
-                    # Backprop
-                    optimizer.zero_grad()
-                    total_loss.backward()
+                    # Skip backward pass if total_loss is 0 (no gradient)
+                    if isinstance(total_loss, torch.Tensor):
+                        if total_loss.item() > 0 or total_loss.requires_grad:
+                            # Backprop
+                            optimizer.zero_grad()
+                            total_loss.backward()
 
-                    # Gradient clipping
-                    torch.nn.utils.clip_grad_norm_(
-                        self.edit_module.parameters(),
-                        self.hparams.gradient_clip
-                    )
+                            # Gradient clipping
+                            torch.nn.utils.clip_grad_norm_(
+                                self.edit_module.parameters(),
+                                self.hparams.gradient_clip
+                            )
 
-                    optimizer.step()
+                            optimizer.step()
 
-                    # Stats
-                    epoch_loss += total_loss.item()
-                    for k, v in losses.items():
-                        if isinstance(v, torch.Tensor):
-                            epoch_breakdown[k] += v.item()
+                            # Stats
+                            epoch_loss += total_loss.item()
+                            for k, v in losses.items():
+                                if isinstance(v, torch.Tensor):
+                                    epoch_breakdown[k] += v.item()
 
                 # Process prompts_backward (neighborhood - should keep original)
                 for prompt in closure.get('prompts_backward', []):
@@ -307,23 +310,26 @@ class TokenEditEditor:
                     # For backward, only apply locality loss
                     total_loss = self.hparams.w_local * losses.get('local', 0)
 
-                    # Backprop
-                    optimizer.zero_grad()
-                    total_loss.backward()
+                    # Skip backward pass if total_loss is 0 (no gradient)
+                    if isinstance(total_loss, torch.Tensor):
+                        if total_loss.item() > 0 or total_loss.requires_grad:
+                            # Backprop
+                            optimizer.zero_grad()
+                            total_loss.backward()
 
-                    # Gradient clipping
-                    torch.nn.utils.clip_grad_norm_(
-                        self.edit_module.parameters(),
-                        self.hparams.gradient_clip
-                    )
+                            # Gradient clipping
+                            torch.nn.utils.clip_grad_norm_(
+                                self.edit_module.parameters(),
+                                self.hparams.gradient_clip
+                            )
 
-                    optimizer.step()
+                            optimizer.step()
 
-                    # Stats
-                    epoch_loss += total_loss.item()
-                    for k, v in losses.items():
-                        if isinstance(v, torch.Tensor):
-                            epoch_breakdown[k] += v.item()
+                            # Stats
+                            epoch_loss += total_loss.item()
+                            for k, v in losses.items():
+                                if isinstance(v, torch.Tensor):
+                                    epoch_breakdown[k] += v.item()
 
             # 更新学习率
             if scheduler is not None:
