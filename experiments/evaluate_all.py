@@ -22,39 +22,50 @@ except ImportError as e:
     sys.exit(1)
 
 def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
-    """从JSON文件加载超参数配置"""
+    """
+    从 JSON 文件加载超参数配置
+    """
     hparams_path = Path(hparams_dir) / f"{model_name}.json"
 
     if not hparams_path.exists():
         print(f"⚠ 警告: 未找到配置文件 {hparams_path}，使用默认值")
+        print(f"⚠ Warning: Config file not found {hparams_path}, using default values")
         return TokenEditHyperParams(model_name=model_name)
 
-    with open(hparams_path, 'r') as f:
+    print(f"✓ 从 {hparams_path} 加载配置")
+    print(f"✓ Loading config from {hparams_path}")
+
+    with open(hparams_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
+
+    # 打印关键配置
+    print(f"  配置参数:")
+    print(f"  Config parameters:")
+    print(f"    - target_layers: {config.get('target_layers', 'not set')}")
+    print(f"    - num_epochs: {config.get('num_epochs', 100)}")
+    print(f"    - learning_rate: {config.get('learning_rate', 0.001)}")
 
     return TokenEditHyperParams(**config)
 
 def load_data(num_samples=100, data_dir: str = "data"):
     """
-    Load data from CounterFact dataset
+    从 CounterFact 数据集加载数据
 
     Args:
-        num_samples: Number of samples to load
-        data_dir: Directory containing the data
+        num_samples: 加载的样本数量
+        data_dir: 数据所在目录
 
     Returns:
-        List of edit requests
+        编辑请求列表
     """
-    from pathlib import Path
-
-    # Try to load CounterFact dataset first
+    # 优先尝试加载 CounterFact 数据集
     data_path = Path(data_dir) / "counterfact.json"
     sample_path = Path(data_dir) / "sample_data.json"
 
-    # If CounterFact doesn't exist, try to download it
+    # 如果 CounterFact 不存在，尝试自动下载
     if not data_path.exists():
         print(f"CounterFact dataset not found at {data_path}")
-        print("Attempting to download...")
+        print(f"正在尝试下载 CounterFact 数据集...")
         try:
             import requests
             data_dir = Path(data_dir)
@@ -65,30 +76,30 @@ def load_data(num_samples=100, data_dir: str = "data"):
             response.raise_for_status()
             with open(data_path, 'w', encoding='utf-8') as f:
                 json.dump(response.json(), f, indent=2)
-            print(f"Downloaded CounterFact dataset: {len(response.json())} samples")
+            print(f"已下载 CounterFact 数据集: {len(response.json())} 个样本")
         except Exception as e:
-            print(f"Failed to download: {e}")
-            print(f"Using sample data from {sample_path}")
+            print(f"下载失败: {e}")
+            print(f"使用样本数据: {sample_path}")
             data_path = sample_path
 
-    # Load the data
+    # 加载数据
     with open(data_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    print(f"Loaded {len(data)} samples from {data_path.name}")
+    print(f"已从 {data_path.name} 加载 {len(data)} 个样本")
 
-    # Convert to request format
+    # 转换为请求格式
     requests = []
     for item in data[:num_samples]:
         req = item['requested_rewrite']
         requests.append({
-            'prompt': req['prompt'],  # Keep template format (not formatted yet)
+            'prompt': req['prompt'],  # 保留模板格式，如 "The capital of {} is"
             'subject': req['subject'],
-            'relation_id': req.get('relation_id', 'capital'),  # Default relation
+            'relation_id': req.get('relation_id', 'capital'),  # 默认关系类型
             'target_new': req['target_new']['str'],
             'target_true': req['target_true']['str'],
-            'paraphrase_prompts': item.get('paraphrase_prompts', []),
-            'neighborhood_prompts': item.get('neighborhood_prompts', [])
+            'paraphrase_prompts': item.get('paraphrase_prompts', []),  # 改写提示
+            'neighborhood_prompts': item.get('neighborhood_prompts', [])  # 邻居提示
         })
     return requests
 
@@ -123,7 +134,9 @@ def evaluate_model(model_name: str, requests: list, num_epochs: int = 30):
         correct = 0
         for req in requests:
             try:
-                output = editor.inference(req['prompt'], max_new_tokens=5)
+                # 需要格式化 prompt，将 subject 填入模板
+                formatted_prompt = req['prompt'].format(req['subject'])
+                output = editor.inference(formatted_prompt, max_new_tokens=5)
                 if req['target_new'].lower() in output.lower():
                     correct += 1
             except Exception as e:
