@@ -44,13 +44,13 @@ class EditTokenModule(nn.Module):
                 self._init_tokens(num_edits, hidden_size, hparams.token_init_method)
             )
         
-        # 门控系数
+        # 门控系数 - 初始化为0，让模型从无干扰开始学习
         if hparams.learnable_gates:
-            self.alpha = nn.Parameter(torch.ones(num_edits))
-            self.beta = nn.Parameter(torch.ones(num_edits))
+            self.alpha = nn.Parameter(torch.zeros(num_edits))
+            self.beta = nn.Parameter(torch.zeros(num_edits))
         else:
-            self.register_buffer("alpha", torch.ones(num_edits))
-            self.register_buffer("beta", torch.ones(num_edits))
+            self.register_buffer("alpha", torch.zeros(num_edits))
+            self.register_buffer("beta", torch.zeros(num_edits))
     
     def _init_tokens(self, num_edits: int, hidden_size: int, method: str) -> torch.Tensor:
         """初始化Token向量"""

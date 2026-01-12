@@ -270,33 +270,44 @@ class TokenEditEditor:
                         closure
                     )
 
-                    # Total loss
+                    # Total loss - 确保所有损失都是 Tensor
+                    edit_loss = losses.get('edit', torch.tensor(0.0, device=self.device))
+                    suppress_loss = losses.get('suppress', torch.tensor(0.0, device=self.device))
+                    ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
+
+                    # 确保是 Tensor 类型
+                    if not isinstance(edit_loss, torch.Tensor):
+                        edit_loss = torch.tensor(0.0, device=self.device)
+                    if not isinstance(suppress_loss, torch.Tensor):
+                        suppress_loss = torch.tensor(0.0, device=self.device)
+                    if not isinstance(ortho_loss, torch.Tensor):
+                        ortho_loss = torch.tensor(0.0, device=self.device)
+
                     total_loss = (
-                        self.hparams.w_edit * losses.get('edit', 0) +
-                        self.hparams.w_suppress * losses.get('suppress', 0) +
-                        self.hparams.w_ortho * losses.get('ortho', 0)
+                        self.hparams.w_edit * edit_loss +
+                        self.hparams.w_suppress * suppress_loss +
+                        self.hparams.w_ortho * ortho_loss
                     )
 
-                    # Skip backward pass if total_loss is 0 (no gradient)
-                    if isinstance(total_loss, torch.Tensor):
-                        if total_loss.item() > 0 or total_loss.requires_grad:
-                            # Backprop
-                            optimizer.zero_grad()
-                            total_loss.backward()
+                    # 只有当 total_loss 确实需要梯度时才反向传播
+                    if isinstance(total_loss, torch.Tensor) and total_loss.requires_grad:
+                        # Backprop
+                        optimizer.zero_grad()
+                        total_loss.backward()
 
-                            # Gradient clipping
-                            torch.nn.utils.clip_grad_norm_(
-                                self.edit_module.parameters(),
-                                self.hparams.gradient_clip
-                            )
+                        # Gradient clipping
+                        torch.nn.utils.clip_grad_norm_(
+                            self.edit_module.parameters(),
+                            self.hparams.gradient_clip
+                        )
 
-                            optimizer.step()
+                        optimizer.step()
 
-                            # Stats
-                            epoch_loss += total_loss.item()
-                            for k, v in losses.items():
-                                if isinstance(v, torch.Tensor):
-                                    epoch_breakdown[k] += v.item()
+                        # Stats
+                        epoch_loss += total_loss.item()
+                        epoch_breakdown['edit'] += edit_loss.item() if isinstance(edit_loss, torch.Tensor) else 0.0
+                        epoch_breakdown['suppress'] += suppress_loss.item() if isinstance(suppress_loss, torch.Tensor) else 0.0
+                        epoch_breakdown['ortho'] += ortho_loss.item() if isinstance(ortho_loss, torch.Tensor) else 0.0
 
                 # Process prompts_backward (neighborhood - should keep original)
                 # Skip if no backward prompts exist
@@ -311,30 +322,39 @@ class TokenEditEditor:
                         closure
                     )
 
-                    # For backward, use both locality and ortho loss
-                    # ortho_loss always requires grad, so total_loss will too
+                    # For backward, use both locality and ortho loss - 确保是 Tensor
+                    local_loss = losses.get('local', torch.tensor(0.0, device=self.device))
+                    ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
+
+                    # 确保是 Tensor 类型
+                    if not isinstance(local_loss, torch.Tensor):
+                        local_loss = torch.tensor(0.0, device=self.device)
+                    if not isinstance(ortho_loss, torch.Tensor):
+                        ortho_loss = torch.tensor(0.0, device=self.device)
+
                     total_loss = (
-                        self.hparams.w_local * losses.get('local', 0) +
-                        self.hparams.w_ortho * losses.get('ortho', 0)
+                        self.hparams.w_local * local_loss +
+                        self.hparams.w_ortho * ortho_loss
                     )
 
-                    # Backprop
-                    optimizer.zero_grad()
-                    total_loss.backward()
+                    # 只有当 total_loss 确实需要梯度时才反向传播
+                    if isinstance(total_loss, torch.Tensor) and total_loss.requires_grad:
+                        # Backprop
+                        optimizer.zero_grad()
+                        total_loss.backward()
 
-                    # Gradient clipping
-                    torch.nn.utils.clip_grad_norm_(
-                        self.edit_module.parameters(),
-                        self.hparams.gradient_clip
-                    )
+                        # Gradient clipping
+                        torch.nn.utils.clip_grad_norm_(
+                            self.edit_module.parameters(),
+                            self.hparams.gradient_clip
+                        )
 
-                    optimizer.step()
+                        optimizer.step()
 
-                    # Stats
-                    epoch_loss += total_loss.item()
-                    for k, v in losses.items():
-                        if isinstance(v, torch.Tensor):
-                            epoch_breakdown[k] += v.item()
+                        # Stats
+                        epoch_loss += total_loss.item()
+                        epoch_breakdown['local'] += local_loss.item() if isinstance(local_loss, torch.Tensor) else 0.0
+                        epoch_breakdown['ortho'] += ortho_loss.item() if isinstance(ortho_loss, torch.Tensor) else 0.0
 
             # 更新学习率
             if scheduler is not None:
