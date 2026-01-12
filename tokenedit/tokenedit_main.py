@@ -299,6 +299,10 @@ class TokenEditEditor:
                                     epoch_breakdown[k] += v.item()
 
                 # Process prompts_backward (neighborhood - should keep original)
+                # Skip if no backward prompts exist
+                if not closure.get('prompts_backward', []):
+                    continue
+
                 for prompt in closure.get('prompts_backward', []):
                     losses = self._compute_sample_loss(
                         edit_id,
@@ -307,29 +311,30 @@ class TokenEditEditor:
                         closure
                     )
 
-                    # For backward, only apply locality loss
-                    total_loss = self.hparams.w_local * losses.get('local', 0)
+                    # For backward, use both locality and ortho loss
+                    # ortho_loss always requires grad, so total_loss will too
+                    total_loss = (
+                        self.hparams.w_local * losses.get('local', 0) +
+                        self.hparams.w_ortho * losses.get('ortho', 0)
+                    )
 
-                    # Skip backward pass if total_loss is 0 (no gradient)
-                    if isinstance(total_loss, torch.Tensor):
-                        if total_loss.item() > 0 or total_loss.requires_grad:
-                            # Backprop
-                            optimizer.zero_grad()
-                            total_loss.backward()
+                    # Backprop
+                    optimizer.zero_grad()
+                    total_loss.backward()
 
-                            # Gradient clipping
-                            torch.nn.utils.clip_grad_norm_(
-                                self.edit_module.parameters(),
-                                self.hparams.gradient_clip
-                            )
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(
+                        self.edit_module.parameters(),
+                        self.hparams.gradient_clip
+                    )
 
-                            optimizer.step()
+                    optimizer.step()
 
-                            # Stats
-                            epoch_loss += total_loss.item()
-                            for k, v in losses.items():
-                                if isinstance(v, torch.Tensor):
-                                    epoch_breakdown[k] += v.item()
+                    # Stats
+                    epoch_loss += total_loss.item()
+                    for k, v in losses.items():
+                        if isinstance(v, torch.Tensor):
+                            epoch_breakdown[k] += v.item()
 
             # 更新学习率
             if scheduler is not None:
