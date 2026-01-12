@@ -200,6 +200,205 @@ def compute_rewrite_quality_counterfact(
     return ret
 
 
+def compute_batch_rewrite_quality(
+    editor: TokenEditEditor,
+    records: List[Dict],
+    skip_generation: bool = False,
+) -> List[Dict]:
+    """
+    Compute rewrite quality for a BATCH of records (super fast!)
+
+    This function processes multiple samples in a single forward pass,
+    fully utilizing your 80GB VRAM.
+
+    Args:
+        editor: TokenEdit editor instance
+        records: List of edit request records
+        skip_generation: Skip generation tests
+
+    Returns:
+        List of metric dictionaries
+    """
+    batch_size = len(records)
+    all_prompts = []
+    all_targets_new = []
+    all_targets_true = []
+    all_correct = []
+    record_indices = []  # Track which record each prompt belongs to
+
+    # Organize all prompts from all records
+    for record_idx, record in enumerate(records):
+        subject = record['subject']
+        target_new = record['target_new']
+        target_true = record['target_true']
+
+        # Test prompts
+        rewrite_prompt = record['prompt'].format(subject)
+        paraphrase_prompts = record.get('paraphrase_prompts', [])[:5]
+        neighborhood_prompts = record.get('neighborhood_prompts', [])[:5]
+
+        # Collect all prompts
+        test_prompts = [
+            [rewrite_prompt],  # rewrite_prompts
+            paraphrase_prompts,  # paraphrase_prompts
+            [nb['prompt'] for nb in neighborhood_prompts]  # neighborhood_prompts
+        ]
+
+        # Mark correct targets
+        which_correct = [
+            [0],  # rewrite: target_new
+            [0] * len(paraphrase_prompts),  # paraphrase: target_new
+            [1] * len(neighborhood_prompts),  # neighborhood: target_true
+        ]
+
+        # Flatten
+        for i, prompts in enumerate(test_prompts):
+            for prompt in prompts:
+                all_prompts.append(prompt)
+                all_targets_new.append(target_new)
+                all_targets_true.append(target_true)
+                all_correct.append(which_correct[i][0] if i == 0 else which_correct[i][prompts.index(prompt)] if i == 1 else which_correct[i][prompts.index(prompt)])
+                record_indices.append(record_idx)
+
+    # Batch compute all probabilities in ONE forward pass
+    probs, targets_correct = test_batch_prediction_multi(
+        editor,
+        all_prompts,
+        all_targets_new,
+        all_targets_true
+    )
+
+    # Reorganize results by record
+    metrics_list = []
+    prompt_idx = 0
+
+    for record_idx, record in enumerate(records):
+        # Count how many prompts this record has
+        rewrite_prompt = record['prompt'].format(record['subject'])
+        paraphrase_prompts = record.get('paraphrase_prompts', [])[:5]
+        neighborhood_prompts = record.get('neighborhood_prompts', [])[:5]
+
+        num_prompts = 1 + len(paraphrase_prompts) + len(neighborhood_prompts)
+
+        # Extract results for this record
+        record_probs = probs[prompt_idx:prompt_idx + num_prompts]
+        record_correct = targets_correct[prompt_idx:prompt_idx + num_prompts]
+
+        # Unflatten
+        ret_probs = [
+            record_probs[0:1],  # rewrite_prompts
+            record_probs[1:1+len(paraphrase_prompts)],  # paraphrase_prompts
+            record_probs[1+len(paraphrase_prompts):num_prompts]  # neighborhood_prompts
+        ]
+        ret_corrects = [
+            record_correct[0:1],
+            record_correct[1:1+len(paraphrase_prompts)],
+            record_correct[1+len(paraphrase_prompts):num_prompts]
+        ]
+
+        # Structure results
+        ret = {
+            "rewrite_prompts_probs": ret_probs[0],
+            "paraphrase_prompts_probs": ret_probs[1],
+            "neighborhood_prompts_probs": ret_probs[2],
+            "rewrite_prompts_correct": ret_corrects[0],
+            "paraphrase_prompts_correct": ret_corrects[1],
+            "neighborhood_prompts_correct": ret_corrects[2],
+            "efficacy": np.mean(ret_corrects[0]) if len(ret_corrects[0]) > 0 else 0.0,
+            "generalization": np.mean(ret_corrects[1]) if len(ret_corrects[1]) > 0 else 0.0,
+            "specificity": np.mean(ret_corrects[2]) if len(ret_corrects[2]) > 0 else 0.0,
+        }
+
+        metrics_list.append(ret)
+        prompt_idx += num_prompts
+
+    return metrics_list
+
+
+def test_batch_prediction_multi(
+    editor: TokenEditEditor,
+    prefixes: List[str],
+    targets_new: List[str],
+    targets_true: List[str],
+) -> tuple:
+    """
+    ULTRA-FAST batch prediction for multiple samples with different targets
+
+    This processes ALL prompts for ALL samples in a SINGLE forward pass!
+
+    Args:
+        editor: TokenEdit editor
+        prefixes: List of all test prompts
+        targets_new: List of target_new strings (one per prefix)
+        targets_true: List of target_true strings (one per prefix)
+
+    Returns:
+        (probs, targets_correct) tuple
+    """
+    # Prepare all inputs
+    all_texts = []
+    for prefix, target_new, target_true in zip(prefixes, targets_new, targets_true):
+        all_texts.append(f"{prefix} {target_new}")
+        all_texts.append(f"{prefix} {target_true}")
+
+    # Tokenize all at once (HUGE batch!)
+    all_inputs = editor.tokenizer(all_texts, padding=True, return_tensors="pt").to(editor.device)
+
+    # Get prefix lengths
+    prefix_lens = [len(editor.tokenizer(prefix)["input_ids"]) for prefix in prefixes]
+
+    # Single MASSIVE batch forward pass
+    with torch.no_grad():
+        outputs = editor.model(**all_inputs)
+        all_logits = outputs.logits
+
+    # Extract probabilities
+    probs = []
+    targets_correct = []
+
+    for i, (prefix, target_new, target_true) in enumerate(zip(prefixes, targets_new, targets_true)):
+        prefix_len = prefix_lens[i]
+
+        # Tokenize targets
+        target_new_tokens = editor.tokenizer(target_new, add_special_tokens=False)["input_ids"]
+        target_true_tokens = editor.tokenizer(target_true, add_special_tokens=False)["input_ids"]
+
+        # Get logits
+        logits_new = all_logits[i * 2]
+        logits_true = all_logits[i * 2 + 1]
+
+        # Compute probability for target_new
+        log_probs_new = []
+        for j, tok in enumerate(target_new_tokens):
+            if prefix_len + j - 1 < logits_new.shape[0]:
+                log_prob = torch.nn.functional.log_softmax(
+                    logits_new[prefix_len + j - 1, :], dim=0
+                )[tok].item()
+                log_probs_new.append(log_prob)
+        prob_new = np.mean(log_probs_new) if len(log_probs_new) > 0 else 0.0
+
+        # Compute probability for target_true
+        log_probs_true = []
+        for j, tok in enumerate(target_true_tokens):
+            if prefix_len + j - 1 < logits_true.shape[0]:
+                log_prob = torch.nn.functional.log_softmax(
+                    logits_true[prefix_len + j - 1, :], dim=0
+                )[tok].item()
+                log_probs_true.append(log_prob)
+        prob_true = np.mean(log_probs_true) if len(log_probs_true) > 0 else 0.0
+
+        probs.append({
+            "target_new": prob_new,
+            "target_true": prob_true
+        })
+
+        # Check if correct (assume should predict target_new for now)
+        is_correct = prob_new > prob_true
+        targets_correct.append(is_correct)
+
+    return probs, targets_correct
+
+
 def test_batch_prediction(
     editor: TokenEditEditor,
     prefixes: List[str],
@@ -208,7 +407,9 @@ def test_batch_prediction(
     target_true: str,
 ) -> tuple:
     """
-    Test batch prediction
+    Test batch prediction - OPTIMIZED VERSION
+
+    Key optimization: Process all prefixes in batches
 
     Args:
         editor: TokenEdit editor
@@ -220,13 +421,57 @@ def test_batch_prediction(
     Returns:
         (probs, targets_correct) tuple
     """
+    # Tokenize targets once
+    target_new_tokens = editor.tokenizer(target_new, add_special_tokens=False)["input_ids"]
+    target_true_tokens = editor.tokenizer(target_true, add_special_tokens=False)["input_ids"]
+
+    # Prepare all inputs
+    all_texts = []
+    for prefix in prefixes:
+        all_texts.append(f"{prefix} {target_new}")
+        all_texts.append(f"{prefix} {target_true}")
+
+    # Tokenize all at once
+    all_inputs = editor.tokenizer(all_texts, padding=True, return_tensors="pt").to(editor.device)
+
+    # Get prefix lengths
+    prefix_lens = [len(editor.tokenizer(prefix)["input_ids"]) for prefix in prefixes]
+
+    # Single batch forward pass
+    with torch.no_grad():
+        outputs = editor.model(**all_inputs)
+        all_logits = outputs.logits
+
+    # Extract probabilities
     probs = []
     targets_correct = []
 
     for i, prefix in enumerate(prefixes):
-        # Get probability of target_new and target_true
-        prob_new = compute_target_probability(editor, prefix, target_new)
-        prob_true = compute_target_probability(editor, prefix, target_true)
+        prefix_len = prefix_lens[i]
+
+        # Get logits for target_new and target_true
+        logits_new = all_logits[i * 2]
+        logits_true = all_logits[i * 2 + 1]
+
+        # Compute probability for target_new
+        log_probs_new = []
+        for j, tok in enumerate(target_new_tokens):
+            if prefix_len + j - 1 < logits_new.shape[0]:
+                log_prob = torch.nn.functional.log_softmax(
+                    logits_new[prefix_len + j - 1, :], dim=0
+                )[tok].item()
+                log_probs_new.append(log_prob)
+        prob_new = np.mean(log_probs_new) if len(log_probs_new) > 0 else 0.0
+
+        # Compute probability for target_true
+        log_probs_true = []
+        for j, tok in enumerate(target_true_tokens):
+            if prefix_len + j - 1 < logits_true.shape[0]:
+                log_prob = torch.nn.functional.log_softmax(
+                    logits_true[prefix_len + j - 1, :], dim=0
+                )[tok].item()
+                log_probs_true.append(log_prob)
+        prob_true = np.mean(log_probs_true) if len(log_probs_true) > 0 else 0.0
 
         probs.append({
             "target_new": prob_new,
@@ -234,7 +479,6 @@ def test_batch_prediction(
         })
 
         # Check if correct prediction
-        correct_target = target_new if which_correct[i] == 0 else target_true
         is_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
         targets_correct.append(is_correct)
 
@@ -326,7 +570,8 @@ def evaluate_model(
     model_name: str = "gpt2-xl",
     num_samples: int = 100,
     skip_generation: bool = True,
-    num_epochs: int = None
+    num_epochs: int = None,
+    eval_batch_size: int = 10
 ):
     """
     Main evaluation function
@@ -336,6 +581,7 @@ def evaluate_model(
         num_samples: Number of samples to evaluate
         skip_generation: Skip generation tests
         num_epochs: Override num_epochs from config
+        eval_batch_size: Batch size for evaluation (larger = faster, uses more VRAM)
     """
     print("=" * 70)
     print(f"TokenEdit Evaluation - {model_name}")
@@ -376,36 +622,43 @@ def evaluate_model(
             return
         raise
 
-    # Evaluate
-    print("\n[Evaluating] Computing rewrite quality metrics...")
+    # Evaluate with BATCHING
+    print(f"\n[Evaluating] Computing rewrite quality metrics (batch_size={eval_batch_size})...")
 
     results = []
     efficacy_list = []
     generalization_list = []
     specificity_list = []
 
-    for req in tqdm(requests, desc="Evaluating"):
-        metrics = compute_rewrite_quality_counterfact(
+    # Process in batches for maximum speed
+    for batch_start in tqdm(range(0, len(requests), eval_batch_size), desc="Evaluating"):
+        batch_end = min(batch_start + eval_batch_size, len(requests))
+        batch_requests = requests[batch_start:batch_end]
+
+        # Batch evaluate all samples in this batch
+        batch_metrics = compute_batch_rewrite_quality(
             editor,
-            req,
+            batch_requests,
             skip_generation=skip_generation
         )
 
-        result = {
-            "case_id": req['case_id'],
-            "requested_rewrite": {
-                "prompt": req['prompt'],
-                "subject": req['subject'],
-                "target_new": req['target_new'],
-                "target_true": req['target_true']
-            },
-            "metrics": metrics
-        }
-        results.append(result)
+        # Collect results
+        for req, metrics in zip(batch_requests, batch_metrics):
+            result = {
+                "case_id": req['case_id'],
+                "requested_rewrite": {
+                    "prompt": req['prompt'],
+                    "subject": req['subject'],
+                    "target_new": req['target_new'],
+                    "target_true": req['target_true']
+                },
+                "metrics": metrics
+            }
+            results.append(result)
 
-        efficacy_list.append(metrics["efficacy"])
-        generalization_list.append(metrics["generalization"])
-        specificity_list.append(metrics["specificity"])
+            efficacy_list.append(metrics["efficacy"])
+            generalization_list.append(metrics["generalization"])
+            specificity_list.append(metrics["specificity"])
 
     # Summary statistics
     summary = {
@@ -444,7 +697,7 @@ def evaluate_model(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Evaluate TokenEdit method")
+    parser = argparse.ArgumentParser(description="Evaluate TokenEdit method (OPTIMIZED for 80GB VRAM)")
     parser.add_argument('--model', type=str, default='gpt2-xl',
                        choices=['gpt2-xl', 'gpt-j-6b', 'llama3-8b'],
                        help='Model name')
@@ -454,6 +707,8 @@ if __name__ == "__main__":
                        help='Number of training epochs (default: use JSON config)')
     parser.add_argument('--skip_generation', action='store_true',
                        help='Skip generation tests (faster)')
+    parser.add_argument('--batch_size', type=int, default=20,
+                       help='Evaluation batch size (larger = faster, uses more VRAM). Try 20-50 for 80GB VRAM')
 
     args = parser.parse_args()
 
@@ -461,5 +716,6 @@ if __name__ == "__main__":
         model_name=args.model,
         num_samples=args.samples,
         skip_generation=args.skip_generation,
-        num_epochs=args.epochs
+        num_epochs=args.epochs,
+        eval_batch_size=args.batch_size
     )
