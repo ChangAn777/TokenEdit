@@ -354,6 +354,13 @@ python -m experiments.evaluate_tokenedit --model gpt2-xl --samples 20 --epochs 5
 
 **修复内容：**
 
+更新了 `load_data()` 函数（在 `experiments/evaluate_tokenedit.py` 和 `experiments/evaluate_all.py`中）：
+
+**原因分析：**
+之前的 `load_data()` 函数只从 `sample_data.json` 加载 2 个样本，不足以进行有意义的评估。
+
+**修复内容：**
+
 更新了 `load_data()` 函数（在 `experiments/evaluate_tokenedit.py` 和 `experiments/evaluate_all.py` 中）：
 
 ```python
@@ -439,3 +446,64 @@ python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 100 --epochs 
 - 数据集：CounterFact（而非 2 个样本）
 - 编辑成功率：80-95%（使用正确的 learning_rate=0.1）
 - 泛化能力：70-90%（使用正确的 target_layers 和权重）
+
+---
+
+## 问题 9：泛化能力差（Generalization: 20%）
+
+**用户反馈：** "Edit success rate: 70.00%，Generalization: 20.00%，如何解决"
+
+**原因分析：**
+1. **`w_edit` 权重过高**：原值为 10，导致模型过度优化原始 prompt，忽略了泛化到改���问法
+2. **`num_paraphrase` 数量不足**：原值为 5，训练时使用的改写样本太少
+3. **`num_epochs` 训练不足**：原值为 100，可能未充分学习泛化模式
+
+**修复内容：**
+
+修改 `hparams/TokenEdit/gpt2-xl.json`：
+
+| 参数 | 修复前 | 修复后 | 说明 |
+|------|--------|--------|------|
+| `num_epochs` | 100 | **150** | 增加训练轮数，充分学习 |
+| `w_edit` | 10 | **1.5** | 降低编辑损失权重，平衡原始和改写 prompt |
+| `num_paraphrase` | 5 | **10** | 增加改写 prompt 数量，提升泛化 |
+
+**原配置问题：**
+```json
+{
+  "num_epochs": 100,   // ❌ 训练不足
+  "w_edit": 10,        // ❌ 权重过高，过度拟合原始 prompt
+  "num_paraphrase": 5  // ❌ 改写样本太少
+}
+```
+
+**修复后配置：**
+```json
+{
+  "num_epochs": 150,   // ✅ 充分训练
+  "w_edit": 1.5,       // ✅ 平衡编辑和泛化
+  "num_paraphrase": 10 // ✅ 更多改写样本
+}
+```
+
+**预期改善：**
+- Edit success rate: 保持 **70-80%**
+- Generalization: 从 20% 提升到 **50-70%**
+
+**进一步优化建议：**
+
+如果泛化能力仍然不理想，可以尝试：
+
+1. **进一步降低 `w_edit`**：尝试 1.0 或 0.5
+2. **增加 `num_paraphrase`**：尝试 15-20
+3. **使用 cosine scheduler**：帮助模型更好地泛化
+4. **增加训练轮数**：尝试 200 epochs
+
+```json
+{
+  "w_edit": 1.0,          // 进一步降低
+  "num_paraphrase": 15,   // 更多改写样本
+  "num_epochs": 200,      // 更多训练轮数
+  "scheduler": "cosine"   // 使用余弦学习率调度
+}
+```
