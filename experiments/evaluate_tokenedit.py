@@ -113,7 +113,7 @@ def load_data(num_samples=100, data_dir: str = "data"):
         requests.append({
             'prompt': req['prompt'],  # 保留模板格式，如 "The capital of {} is"
             'subject': req['subject'],
-            'relation': 'capital',  # 默认关系类型
+            'relation_id': req.get('relation_id', 'P36'),  # 使用数据集的关系ID
             'target_new': req['target_new']['str'],
             'target_true': req['target_true']['str'],
             'paraphrase_prompts': item.get('paraphrase_prompts', []),  # 改写提示，用于测试泛化
