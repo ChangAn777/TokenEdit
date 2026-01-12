@@ -1,4 +1,16 @@
 """调试版本的TokenEdit测试 - 显示详细信息"""
+
+import os
+
+# 1. 强制移除代理设置 (防止报错 FileNotFoundError)
+os.environ.pop("HTTP_PROXY", None)
+os.environ.pop("HTTPS_PROXY", None)
+os.environ.pop("http_proxy", None)
+os.environ.pop("https_proxy", None)
+
+# 2. 指定 HuggingFace 镜像站
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 import json
 import os
 import sys

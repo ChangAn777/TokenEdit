@@ -53,7 +53,7 @@ class TokenEditEditor:
                 torch.backends.cudnn.benchmark = False
                 
             if hparams.verbose:
-                print(f"🔒 已强制固定随机种子: {hparams.seed}")
+                print(f"强制固定随机种子: {hparams.seed}")
         # ===================================================================
 
         self.model = model
@@ -164,25 +164,28 @@ class TokenEditEditor:
         
         train_data = []
         for i, req in enumerate(requests):
-            # 生成四类样本
-            closure = self.closure_gen.generate(
+            # Generate prompt closure using new data-driven API
+            closure = self.closure_gen.generate_from_dataset(
+                rewrite_prompt=req['prompt'],
                 subject=req['subject'],
-                relation=req.get('relation', 'capital'),  # 默认关系
-                new_object=req['target_new'],
-                old_object=req['target_true']
+                target_new=req['target_new'],
+                target_true=req['target_true'],
+                paraphrase_prompts=req.get('paraphrase_prompts', []),
+                neighborhood_prompts=req.get('neighborhood_prompts', []),
+                num_paraphrase=self.hparams.num_paraphrase
             )
-            
+
             train_data.append({
                 'edit_id': i,
                 'closure': closure,
                 'request': req
             })
-            
-            # 注册到路由器
+
+            # Register to router
             self.router.register_edit(
-                i, 
-                req['subject'], 
-                req.get('relation', 'capital')
+                i,
+                req['subject'],
+                req.get('relation', 'unknown')
             )
             self.edits_registry[i] = req
         
@@ -257,66 +260,87 @@ class TokenEditEditor:
             for data in train_data:
                 edit_id = data['edit_id']
                 closure = data['closure']
-                
-                # 对每类样本计算损失
-                sample_types = []
-                if self.hparams.use_forward:
-                    sample_types.append(('forward', closure['forward']))
-                if self.hparams.use_backward:
-                    sample_types.append(('backward', closure['backward']))
-                if self.hparams.use_judge:
-                    sample_types.append(('judge', closure['judge']))
-                if self.hparams.use_distract:
-                    sample_types.append(('distract', closure['distract']))
-                
-                for sample_type, prompts in sample_types:
-                    num_samples = max(1, int(self.hparams.num_paraphrase))
-                    for prompt in prompts[:num_samples]:
-                        # 计算损失
-                        losses = self._compute_sample_loss(
-                            edit_id,
-                            prompt,
-                            sample_type,
-                            closure
-                        )
-                        
-                        # 综合损失
-                        total_loss = (
-                            self.hparams.w_edit * losses.get('edit', 0) +
-                            self.hparams.w_suppress * losses.get('suppress', 0) +
-                            self.hparams.w_ortho * losses.get('ortho', 0) +
-                            self.hparams.w_local * losses.get('local', 0)
-                        )
-                        
-                        # 反向传播
-                        optimizer.zero_grad()
-                        total_loss.backward()
-                        
-                        # 梯度裁剪
-                        torch.nn.utils.clip_grad_norm_(
-                            self.edit_module.parameters(),
-                            self.hparams.gradient_clip
-                        )
-                        
-                        optimizer.step()
-                        
-                        # 统计
-                        epoch_loss += total_loss.item()
-                        for k, v in losses.items():
-                            if isinstance(v, torch.Tensor):
-                                epoch_breakdown[k] += v.item()
-            
+
+                # Process prompts_forward (should output target_new)
+                for prompt in closure.get('prompts_forward', []):
+                    losses = self._compute_sample_loss(
+                        edit_id,
+                        prompt,
+                        'forward',
+                        closure
+                    )
+
+                    # Total loss
+                    total_loss = (
+                        self.hparams.w_edit * losses.get('edit', 0) +
+                        self.hparams.w_suppress * losses.get('suppress', 0) +
+                        self.hparams.w_ortho * losses.get('ortho', 0)
+                    )
+
+                    # Backprop
+                    optimizer.zero_grad()
+                    total_loss.backward()
+
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(
+                        self.edit_module.parameters(),
+                        self.hparams.gradient_clip
+                    )
+
+                    optimizer.step()
+
+                    # Stats
+                    epoch_loss += total_loss.item()
+                    for k, v in losses.items():
+                        if isinstance(v, torch.Tensor):
+                            epoch_breakdown[k] += v.item()
+
+                # Process prompts_backward (neighborhood - should keep original)
+                for prompt in closure.get('prompts_backward', []):
+                    losses = self._compute_sample_loss(
+                        edit_id,
+                        prompt,
+                        'backward',
+                        closure
+                    )
+
+                    # For backward, only apply locality loss
+                    total_loss = self.hparams.w_local * losses.get('local', 0)
+
+                    # Backprop
+                    optimizer.zero_grad()
+                    total_loss.backward()
+
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(
+                        self.edit_module.parameters(),
+                        self.hparams.gradient_clip
+                    )
+
+                    optimizer.step()
+
+                    # Stats
+                    epoch_loss += total_loss.item()
+                    for k, v in losses.items():
+                        if isinstance(v, torch.Tensor):
+                            epoch_breakdown[k] += v.item()
+
             # 更新学习率
             if scheduler is not None:
                 scheduler.step()
-            
+
             # 记录统计
-            num_samples = len(train_data) * len(sample_types)
-            stats['losses'].append(epoch_loss / num_samples)
-            for k in epoch_breakdown.keys():
-                stats['loss_breakdown'][k].append(
-                    epoch_breakdown[k] / num_samples
-                )
+            total_prompts = sum(
+                len(closure.get('prompts_forward', [])) +
+                len(closure.get('prompts_backward', []))
+                for closure in [data['closure'] for data in train_data]
+            )
+            if total_prompts > 0:
+                stats['losses'].append(epoch_loss / total_prompts)
+                for k in epoch_breakdown.keys():
+                    stats['loss_breakdown'][k].append(
+                        epoch_breakdown[k] / total_prompts
+                    )
             
             # 打印进度
             if (epoch + 1) % 10 == 0 and self.hparams.verbose:
@@ -338,7 +362,7 @@ class TokenEditEditor:
     ) -> Dict[str, torch.Tensor]:
         """
         计算单个样本的损失
-        
+
         Returns:
             {
                 'edit': L_edit,
@@ -348,42 +372,49 @@ class TokenEditEditor:
             }
         """
         losses = {}
-        
-        # 1. 编辑成功损失 (L_edit)
-        if sample_type in ['forward', 'backward', 'judge']:
-            edit_loss = self._compute_edit_loss(
-                edit_id, prompt, closure['targets'][sample_type]
-            )
+
+        # Get target based on sample type
+        if sample_type == 'forward':
+            target = closure.get('targets_forward', '')
+            old_target = closure.get('targets_backward', '')
+        elif sample_type == 'backward':
+            # For backward prompts, keep original behavior (no edit target)
+            target = None
+            old_target = None
+        else:
+            target = None
+            old_target = None
+
+        # 1. 编辑成功损失 (L_edit) - only for forward samples
+        if sample_type == 'forward' and target:
+            edit_loss = self._compute_edit_loss(edit_id, prompt, target)
             losses['edit'] = edit_loss
         else:
             losses['edit'] = torch.tensor(0.0, device=self.device)
-        
-        # 2. 反事实抑制损失 (L_suppress)
-        if sample_type == 'forward':
-            suppress_loss = self._compute_suppress_loss(
-                edit_id, prompt, closure['old_object']
-            )
+
+        # 2. 反事实抑制损失 (L_suppress) - only for forward samples
+        if sample_type == 'forward' and old_target:
+            suppress_loss = self._compute_suppress_loss(edit_id, prompt, old_target)
             losses['suppress'] = suppress_loss
         else:
             losses['suppress'] = torch.tensor(0.0, device=self.device)
-        
-        # 3. 正交性损失 (L_ortho)
-        # 获取prompt的嵌入
+
+        # 3. 正交性损失 (L_ortho) - always compute
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.model(**inputs, output_hidden_states=True)
             prompt_emb = outputs.hidden_states[-1].mean(dim=1)
-        
+
         ortho_loss = self.edit_module.compute_orthogonality_loss(prompt_emb)
         losses['ortho'] = ortho_loss
-        
-        # 4. 局部性损失 (L_local)
-        if sample_type == 'distract':
+
+        # 4. 局部性损失 (L_local) - only for backward samples
+        if sample_type == 'backward':
             local_loss = self._compute_local_loss(edit_id, prompt)
             losses['local'] = local_loss
         else:
             losses['local'] = torch.tensor(0.0, device=self.device)
-        
+
         return losses
     
     def _compute_edit_loss(
