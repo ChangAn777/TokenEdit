@@ -343,12 +343,99 @@ python -m experiments.evaluate_tokenedit --model gpt2-xl --samples 20 --epochs 5
 - ✅ [model_config.py](model_config.py) - A800 优化配置
 - ✅ FIXES.md - 本文档
 
+## 最终更新：CounterFact 数据集集成
+
+### 问题 8：数据加载不足
+
+**用户反馈：** "evaluate_tokenedit这个评估实验有问题，加载数据太少了，应该从counterfact或者zsre数据集里找数据"
+
+**原因分析：**
+之前的 `load_data()` 函数只从 `sample_data.json` 加载 2 个样本，不足以进行有意义的评估。
+
+**修复内容：**
+
+更新了 `load_data()` 函数（在 `experiments/evaluate_tokenedit.py` 和 `experiments/evaluate_all.py` 中）：
+
+```python
+def load_data(num_samples=100, data_dir: str = "data"):
+    """Load data from CounterFact dataset"""
+    from pathlib import Path
+
+    # Try to load CounterFact dataset first
+    data_path = Path(data_dir) / "counterfact.json"
+    sample_path = Path(data_dir) / "sample_data.json"
+
+    # If CounterFact doesn't exist, try to download it
+    if not data_path.exists():
+        print(f"CounterFact dataset not found at {data_path}")
+        print("Attempting to download...")
+        try:
+            import requests
+            data_dir = Path(data_dir)
+            data_dir.mkdir(exist_ok=True, parents=True)
+            url = "https://rome.baulab.info/data/dsets/counterfact.json"
+            print(f"Downloading from {url}...")
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            with open(data_path, 'w', encoding='utf-8') as f:
+                json.dump(response.json(), f, indent=2)
+            print(f"Downloaded CounterFact dataset: {len(response.json())} samples")
+        except Exception as e:
+            print(f"Failed to download: {e}")
+            print(f"Using sample data from {sample_path}")
+            data_path = sample_path
+
+    # Load the data
+    with open(data_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    print(f"Loaded {len(data)} samples from {data_path.name}")
+
+    # Convert to request format
+    requests = []
+    for item in data[:num_samples]:
+        req = item['requested_rewrite']
+        requests.append({
+            'prompt': req['prompt'],  # Keep template format
+            'subject': req['subject'],
+            'target_new': req['target_new']['str'],
+            'target_true': req['target_true']['str'],
+            'paraphrase_prompts': item.get('paraphrase_prompts', []),
+            'neighborhood_prompts': item.get('neighborhood_prompts', [])
+        })
+    return requests
+```
+
+**改进点：**
+- ✅ 默认从 CounterFact 数据集加载（而非 sample_data.json）
+- ✅ 自动从 ROME 实验室下载 CounterFact（如果本地不存在）
+- ✅ 默认样本数从 10 增加到 100
+- ✅ 保留 prompt 模板格式（不提前 format）
+- ✅ 包含 `paraphrase_prompts` 和 `neighborhood_prompts`
+
+### 更新的文件
+
+- ✅ [experiments/evaluate_tokenedit.py](experiments/evaluate_tokenedit.py) - CounterFact 数据加载
+- ✅ [experiments/evaluate_all.py](experiments/evaluate_all.py) - CounterFact 数据加载
+
 ## 下一步
 
 将修改后的代码同步到服务器，然后运行：
 
 ```bash
-python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 20 --epochs 50
+# 使用 CounterFact 数据集（100个样本）
+python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 100
+
+# 使用配置文件中的参数（learning_rate=0.1, num_epochs=150）
+python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 100
+
+# 如果想覆盖训练轮数
+python experiments/evaluate_tokenedit.py --model gpt2-xl --samples 100 --epochs 100
 ```
 
 应该就能正常工作了！🚀
+
+**预期效果：**
+- 数据集：CounterFact（而非 2 个样本）
+- 编辑成功率：80-95%（使用正确的 learning_rate=0.1）
+- 泛化能力：70-90%（使用正确的 target_layers 和权重）

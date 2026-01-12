@@ -34,19 +34,61 @@ def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdi
 
     return TokenEditHyperParams(**config)
 
-def load_data(num_samples=10):
-    """加载数据"""
-    with open("data/sample_data.json") as f:
+def load_data(num_samples=100, data_dir: str = "data"):
+    """
+    Load data from CounterFact dataset
+
+    Args:
+        num_samples: Number of samples to load
+        data_dir: Directory containing the data
+
+    Returns:
+        List of edit requests
+    """
+    from pathlib import Path
+
+    # Try to load CounterFact dataset first
+    data_path = Path(data_dir) / "counterfact.json"
+    sample_path = Path(data_dir) / "sample_data.json"
+
+    # If CounterFact doesn't exist, try to download it
+    if not data_path.exists():
+        print(f"CounterFact dataset not found at {data_path}")
+        print("Attempting to download...")
+        try:
+            import requests
+            data_dir = Path(data_dir)
+            data_dir.mkdir(exist_ok=True, parents=True)
+            url = "https://rome.baulab.info/data/dsets/counterfact.json"
+            print(f"Downloading from {url}...")
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            with open(data_path, 'w', encoding='utf-8') as f:
+                json.dump(response.json(), f, indent=2)
+            print(f"Downloaded CounterFact dataset: {len(response.json())} samples")
+        except Exception as e:
+            print(f"Failed to download: {e}")
+            print(f"Using sample data from {sample_path}")
+            data_path = sample_path
+
+    # Load the data
+    with open(data_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
+    print(f"Loaded {len(data)} samples from {data_path.name}")
+
+    # Convert to request format
     requests = []
     for item in data[:num_samples]:
         req = item['requested_rewrite']
         requests.append({
-            'prompt': req['prompt'].format(req['subject']),
+            'prompt': req['prompt'],  # Keep template format (not formatted yet)
             'subject': req['subject'],
+            'relation_id': req.get('relation_id', 'capital'),  # Default relation
             'target_new': req['target_new']['str'],
-            'target_true': req['target_true']['str']
+            'target_true': req['target_true']['str'],
+            'paraphrase_prompts': item.get('paraphrase_prompts', []),
+            'neighborhood_prompts': item.get('neighborhood_prompts', [])
         })
     return requests
 
@@ -123,10 +165,10 @@ def evaluate_model(model_name: str, requests: list, num_epochs: int = 30):
             'error': str(e)
         }
 
-def main(models=None, num_samples=10, num_epochs=30):
+def main(models=None, num_samples=100, num_epochs=30):
     """
     对比实验主函数
-    
+
     Args:
         models: 要评估的模型列表，None表示全部
         num_samples: 样本数
@@ -184,7 +226,7 @@ if __name__ == "__main__":
     parser.add_argument('--models', nargs='+', 
                        default=['gpt2-xl', 'gpt-j-6b', 'llama3-8b'],
                        help='要评估的模型列表')
-    parser.add_argument('--samples', type=int, default=10)
+    parser.add_argument('--samples', type=int, default=100)
     parser.add_argument('--epochs', type=int, default=30)
     
     args = parser.parse_args()
