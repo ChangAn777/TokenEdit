@@ -252,7 +252,7 @@ class TokenEditEditor:
             }
         }
         
-        # 训练循环 - 优化版：批量处理 prompts
+        # 训练循环 - 真正的批量处理优化
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
             epoch_breakdown = {k: 0.0 for k in stats['loss_breakdown'].keys()}
@@ -282,24 +282,42 @@ class TokenEditEditor:
                         'closure': closure
                     })
 
-            # 批量处理（如果样本数太多，可以分批）
-            batch_size = 50  # 每次处理 50 个 prompts
+            # 超大批量处理 - 充分利用80GB VRAM
+            batch_size = 200  # 大幅增加batch size以充分利用显存
             for batch_start in range(0, len(all_training_samples), batch_size):
                 batch_end = min(batch_start + batch_size, len(all_training_samples))
                 batch_samples = all_training_samples[batch_start:batch_end]
 
-                # 计算这个 batch 的总梯度
+                # 批量tokenization
+                batch_prompts = [s['prompt'] for s in batch_samples]
+                batch_inputs = self.tokenizer(
+                    batch_prompts,
+                    padding=True,
+                    return_tensors="pt"
+                ).to(self.device)
+
+                # 一次性前向传播所有prompts，获取hidden states
+                with torch.enable_grad():  # 确保梯度可以计算
+                    batch_outputs = self.model(
+                        **batch_inputs,
+                        output_hidden_states=True
+                    )
+                    # 获取所有prompts的prompt embeddings: [batch_size, hidden_dim]
+                    prompt_embeddings = batch_outputs.hidden_states[-1].mean(dim=1)
+
+                # 计算每个样本的损失（共享前向传播结果）
                 optimizer.zero_grad()
                 batch_loss = 0.0
 
-                for sample in batch_samples:
+                for idx, sample in enumerate(batch_samples):
                     edit_id = sample['edit_id']
-                    prompt = sample['prompt']
                     sample_type = sample['type']
                     closure = sample['closure']
+                    prompt_emb = prompt_embeddings[idx:idx+1]  # [1, hidden_dim]
 
-                    losses = self._compute_sample_loss(
-                        edit_id, prompt, sample_type, closure
+                    # 使用共享的prompt embedding计算损失
+                    losses = self._compute_sample_loss_with_emb(
+                        edit_id, prompt_emb, sample_type, closure
                     )
 
                     # 根据类型组合损失
@@ -367,6 +385,10 @@ class TokenEditEditor:
                     )
 
                     optimizer.step()
+
+                # 显式清理显存
+                del batch_outputs, prompt_embeddings
+                torch.cuda.empty_cache()
 
             # 更新学习率
             if scheduler is not None:
@@ -459,7 +481,69 @@ class TokenEditEditor:
             losses['local'] = torch.tensor(0.0, device=self.device)
 
         return losses
-    
+
+    def _compute_sample_loss_with_emb(
+        self,
+        edit_id: int,
+        prompt_emb: torch.Tensor,  # 预先计算好的prompt embedding [1, hidden_dim]
+        sample_type: str,
+        closure: Dict
+    ) -> Dict[str, torch.Tensor]:
+        """
+        使用预先计算的prompt embedding计算损失
+        避免重复前向传播，加速批量训练
+
+        Returns:
+            {
+                'edit': L_edit,
+                'suppress': L_suppress,
+                'ortho': L_ortho,
+                'local': L_local
+            }
+        """
+        losses = {}
+
+        # Get target based on sample type
+        if sample_type == 'forward':
+            target = closure.get('targets_forward', '')
+            old_target = closure.get('targets_backward', '')
+            prompt = closure.get('prompts_forward', [''])[0] if closure.get('prompts_forward') else ''
+        elif sample_type == 'backward':
+            target = None
+            old_target = None
+            prompt = closure.get('prompts_backward', [''])[0] if closure.get('prompts_backward') else ''
+        else:
+            target = None
+            old_target = None
+            prompt = ''
+
+        # 1. 编辑成功损失 (L_edit) - only for forward samples
+        if sample_type == 'forward' and target:
+            edit_loss = self._compute_edit_loss(edit_id, prompt, target)
+            losses['edit'] = edit_loss
+        else:
+            losses['edit'] = torch.tensor(0.0, device=self.device)
+
+        # 2. 反事实抑制损失 (L_suppress) - only for forward samples
+        if sample_type == 'forward' and old_target:
+            suppress_loss = self._compute_suppress_loss(edit_id, prompt, old_target)
+            losses['suppress'] = suppress_loss
+        else:
+            losses['suppress'] = torch.tensor(0.0, device=self.device)
+
+        # 3. 正交性损失 (L_ortho) - 直接使用传入的embedding
+        ortho_loss = self.edit_module.compute_orthogonality_loss(prompt_emb)
+        losses['ortho'] = ortho_loss
+
+        # 4. 局部性损失 (L_local) - only for backward samples
+        if sample_type == 'backward':
+            local_loss = self._compute_local_loss(edit_id, prompt)
+            losses['local'] = local_loss
+        else:
+            losses['local'] = torch.tensor(0.0, device=self.device)
+
+        return losses
+
     def _compute_edit_loss(
         self,
         edit_id: int,

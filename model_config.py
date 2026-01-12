@@ -81,6 +81,7 @@ def load_model_optimized(model_name: str, device_id=0):
     print("  正在加载模型到CPU...")
     model = AutoModelForCausalLM.from_pretrained(
         config['model_name'],
+        local_files_only=True,  # 优先使用本地缓存，避免网络问题
         **load_kwargs
     )
 
@@ -89,7 +90,10 @@ def load_model_optimized(model_name: str, device_id=0):
     model = model.to(device)
 
     # 加载tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
+    tokenizer = AutoTokenizer.from_pretrained(
+        config['model_name'],
+        local_files_only=True  # 优先使用本地缓存
+    )
 
     # 设置pad_token
     if tokenizer.pad_token is None:
