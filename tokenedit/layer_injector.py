@@ -22,8 +22,7 @@ class LayerInjector:
         model,
         edit_id: int,
         edit_module,
-        subject_positions: List[int],
-        initial_seq_len: int = None
+        subject_positions: List[int]
     ):
         """
         注入编辑向量到目标层
@@ -33,15 +32,10 @@ class LayerInjector:
             edit_id: 编辑ID
             edit_module: EditTokenModule实例
             subject_positions: 主体token在序列中的位置
-            initial_seq_len: 初始序列长度（用于避免重复注入）
         """
         self.active_edit_id = edit_id
         self.edit_module = edit_module
         self.subject_positions = subject_positions
-
-        # 记录初始序列长度，用于在hook中防止重复注入
-        if initial_seq_len is not None:
-            self._initial_seq_len = initial_seq_len
 
         # 为每个目标层注册hook
         for layer_idx in self.target_layers:
@@ -67,24 +61,11 @@ class LayerInjector:
         Hook函数：修改隐藏状态
 
         h'(s) = h(s) + α * v_new + β * v_old
-
-        【重要】只注入一次，避免在自回归生成时重复注入
         """
         # output是一个tuple: (hidden_states, ...)
         hidden_states = output[0]  # (batch_size, seq_len, hidden_size)
 
         if self.active_edit_id is not None and self.edit_module is not None:
-            # 【关键】只注入原始prompt的位置，不注入新生成的token位置
-            # 这样可以避免在自回归生成时重复注入
-            seq_len = hidden_states.size(1)
-
-            # 检查序列长度是否超过初始prompt长度
-            # 如果超过，说明已经在生成阶段了，不应该再注入
-            if hasattr(self, '_initial_seq_len'):
-                if seq_len > self._initial_seq_len:
-                    # 序列已经扩展，不再注入
-                    return output
-
             # 获取编辑向量
             v_new, v_old, alpha, beta = self.edit_module.get_edit_vectors(
                 self.active_edit_id
@@ -114,6 +95,3 @@ class LayerInjector:
         self.active_edit_id = None
         self.edit_module = None
         self.subject_positions = None
-        # 清除初始序列长度记录
-        if hasattr(self, '_initial_seq_len'):
-            delattr(self, '_initial_seq_len')

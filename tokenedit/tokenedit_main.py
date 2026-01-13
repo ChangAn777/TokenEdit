@@ -380,9 +380,9 @@ class TokenEditEditor:
                     optimizer.step()
 
                     # 【关键】参数裁剪 - 防止over-injection
-                    # 直接限制v_new和v_old的范数，以及alpha/beta，而不是通过loss约束
+                    # 直接限制v_new和v_old的范数，以及alpha/beta
                     with torch.no_grad():
-                        max_v_norm = 3.0  # 更严格的向量范数限制（从5.0降到3.0）
+                        max_v_norm = 5.0
 
                         # 1. 裁剪v_new的范数
                         if not self.hparams.use_low_rank:
@@ -390,15 +390,15 @@ class TokenEditEditor:
                             scale = torch.clamp(max_v_norm / (v_new_norms + 1e-8), max=1.0)
                             self.edit_module.v_new.data *= scale.unsqueeze(-1)
 
-                        # 2. 裁剪v_old的范数（重要！v_old也会导致over-injection）
+                        # 2. 裁剪v_old的范数
                         if not self.hparams.use_low_rank:
                             v_old_norms = torch.norm(self.edit_module.v_old, dim=-1)
                             scale = torch.clamp(max_v_norm / (v_old_norms + 1e-8), max=1.0)
                             self.edit_module.v_old.data *= scale.unsqueeze(-1)
 
-                        # 3. 裁剪alpha和beta（更严格的限制，防止总注入强度过大）
-                        max_alpha = 1.0  # 从2.0降到1.0
-                        self.edit_module.alpha.data = torch.clamp(self.edit_module.alpha.data, -max_alpha, max_alpha)
+                        # 3. 裁剪alpha和beta（强制alpha为正，避免负值削弱编辑效果）
+                        max_alpha = 2.0
+                        self.edit_module.alpha.data = torch.clamp(self.edit_module.alpha.data, 0.0, max_alpha)  # alpha >= 0
                         self.edit_module.beta.data = torch.clamp(self.edit_module.beta.data, -max_alpha, max_alpha)
 
                     optimizer.zero_grad()
@@ -595,14 +595,12 @@ class TokenEditEditor:
         full_text = f"{prompt} {target}"
         inputs = self.tokenizer(full_text, return_tensors="pt").to(self.device)
 
-        # 注入编辑向量（传入初始序列长度，防止重复注入）
-        initial_seq_len = inputs['input_ids'].size(1)
+        # 注入编辑向量
         self.injector.inject(
             self.model,
             edit_id,
             self.edit_module,
-            subject_positions,
-            initial_seq_len=initial_seq_len
+            subject_positions
         )
 
         # 前向传播 - 只计算目标token的损失
@@ -638,14 +636,12 @@ class TokenEditEditor:
         subject_tokens = self.tokenizer.encode(subject, add_special_tokens=False)
         subject_positions = list(range(1, 1 + len(subject_tokens)))
 
-        # 注入（传入初始序列长度，防止重复注入）
-        initial_seq_len = inputs['input_ids'].size(1)
+        # 注入
         self.injector.inject(
             self.model,
             edit_id,
             self.edit_module,
-            subject_positions,
-            initial_seq_len=initial_seq_len
+            subject_positions
         )
         
         # 前向传播
