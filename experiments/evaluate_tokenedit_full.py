@@ -14,7 +14,7 @@ sys.path.insert(0, project_root)
 import json
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -28,6 +28,17 @@ except ImportError as e:
     print(f"Python path: {sys.path}")
     print(f"Project root: {project_root}")
     sys.exit(1)
+
+
+def _json_default(o: Any):
+    """Convert numpy types to Python native types for JSON serialization."""
+    if isinstance(o, (np.bool_, np.bool8)):
+        return bool(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    return o
 
 
 def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
@@ -693,7 +704,7 @@ def evaluate_model(
     Path("results").mkdir(exist_ok=True)
     results_file = f"results/tokenedit_{model_name.replace('/', '_')}_full.json"
     with open(results_file, 'w', encoding='utf-8') as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
+        json.dump(summary, f, indent=2, ensure_ascii=False, default=_json_default)
 
     print(f"\nResults saved to: {results_file}")
 
