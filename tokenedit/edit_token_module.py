@@ -131,9 +131,52 @@ class EditTokenModule(nn.Module):
                     dim=-1
                 )
                 loss += self.hparams.ortho_prompt_lambda * cosine_sim.pow(2).mean()
-        
+
         return loss
-    
+
+    def compute_norm_constraint_loss(self, max_norm: float = 10.0) -> torch.Tensor:
+        """
+        计算范数约束损失，防止Over-injection
+
+        当模型难以拟合某些知识时，优化器会无限增大alpha和v_new的范数，
+        导致注入向量 h' = h + α*v_new 的模长远超正常分布。
+
+        L_norm = max(0, ||α*v_new|| - max_norm) + max(0, |α| - max_alpha)
+
+        Args:
+            max_norm: 注入向量的最大允许范数（默认10.0）
+            max_alpha: 门控系数的最大允许值（默认5.0）
+
+        Returns:
+            loss: scalar tensor
+        """
+        loss = torch.tensor(0.0, device=self.alpha.device)
+
+        # ��取完整的Token矩阵
+        if self.hparams.use_low_rank:
+            v_new_full = self.v_new_U @ self.v_new_V
+        else:
+            v_new_full = self.v_new
+
+        # 计算每个edit的注入向量范数: ||α * v_new||
+        injection_norms = torch.abs(self.alpha) * torch.norm(v_new_full, dim=-1)
+
+        # 约束1: 注入向量范数不应超过max_norm
+        norm_violations = torch.nn.functional.relu(injection_norms - max_norm)
+        loss += norm_violations.pow(2).mean()
+
+        # 约束2: alpha不应过大（防止极端放大）
+        max_alpha = 5.0
+        alpha_violations = torch.nn.functional.relu(torch.abs(self.alpha) - max_alpha)
+        loss += alpha_violations.pow(2).mean()
+
+        # 约束3: v_new本身的范数也不应过大
+        v_new_norms = torch.norm(v_new_full, dim=-1)
+        v_new_violations = torch.nn.functional.relu(v_new_norms - max_norm)
+        loss += v_new_violations.pow(2).mean()
+
+        return loss
+
     def forward(self, edit_id: int, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         应用编辑向量

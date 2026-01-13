@@ -238,7 +238,8 @@ class TokenEditEditor:
                 'edit': [],
                 'suppress': [],
                 'ortho': [],
-                'local': []
+                'local': [],
+                'norm': []  # 添加范数约束损失统计
             }
         }
 
@@ -302,6 +303,7 @@ class TokenEditEditor:
                         edit_loss = losses.get('edit', torch.tensor(0.0, device=self.device))
                         suppress_loss = losses.get('suppress', torch.tensor(0.0, device=self.device))
                         ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
+                        norm_loss = losses.get('norm', torch.tensor(0.0, device=self.device))
 
                         if not isinstance(edit_loss, torch.Tensor):
                             edit_loss = torch.tensor(0.0, device=self.device)
@@ -309,11 +311,14 @@ class TokenEditEditor:
                             suppress_loss = torch.tensor(0.0, device=self.device)
                         if not isinstance(ortho_loss, torch.Tensor):
                             ortho_loss = torch.tensor(0.0, device=self.device)
+                        if not isinstance(norm_loss, torch.Tensor):
+                            norm_loss = torch.tensor(0.0, device=self.device)
 
                         sample_loss = (
                             self.hparams.w_edit * edit_loss +
                             self.hparams.w_suppress * suppress_loss +
-                            self.hparams.w_ortho * ortho_loss
+                            self.hparams.w_ortho * ortho_loss +
+                            0.1 * norm_loss  # 范数约束权重
                         )
 
                         # Stats
@@ -324,18 +329,24 @@ class TokenEditEditor:
                             epoch_breakdown['suppress'] += suppress_loss.item()
                         if isinstance(ortho_loss, torch.Tensor):
                             epoch_breakdown['ortho'] += ortho_loss.item()
+                        if isinstance(norm_loss, torch.Tensor):
+                            epoch_breakdown['norm'] += norm_loss.item()
                     else:  # backward
                         local_loss = losses.get('local', torch.tensor(0.0, device=self.device))
                         ortho_loss = losses.get('ortho', torch.tensor(0.0, device=self.device))
+                        norm_loss = losses.get('norm', torch.tensor(0.0, device=self.device))
 
                         if not isinstance(local_loss, torch.Tensor):
                             local_loss = torch.tensor(0.0, device=self.device)
                         if not isinstance(ortho_loss, torch.Tensor):
                             ortho_loss = torch.tensor(0.0, device=self.device)
+                        if not isinstance(norm_loss, torch.Tensor):
+                            norm_loss = torch.tensor(0.0, device=self.device)
 
                         sample_loss = (
                             self.hparams.w_local * local_loss +
-                            self.hparams.w_ortho * ortho_loss
+                            self.hparams.w_ortho * ortho_loss +
+                            0.1 * norm_loss
                         )
 
                         # Stats
@@ -344,6 +355,8 @@ class TokenEditEditor:
                             epoch_breakdown['local'] += local_loss.item()
                         if isinstance(ortho_loss, torch.Tensor):
                             epoch_breakdown['ortho'] += ortho_loss.item()
+                        if isinstance(norm_loss, torch.Tensor):
+                            epoch_breakdown['norm'] += norm_loss.item()
 
                     # 累加到 batch loss
                     if isinstance(sample_loss, torch.Tensor) and sample_loss.requires_grad:
@@ -397,6 +410,8 @@ class TokenEditEditor:
                 print(f"  Suppress: {stats['loss_breakdown']['suppress'][-1]:.4f}")
                 print(f"  Ortho: {stats['loss_breakdown']['ortho'][-1]:.4f}")
                 print(f"  Local: {stats['loss_breakdown']['local'][-1]:.4f}")
+                if len(stats['loss_breakdown']['norm']) > 0:
+                    print(f"  Norm: {stats['loss_breakdown']['norm'][-1]:.4f}")
 
         return stats
     
@@ -517,7 +532,11 @@ class TokenEditEditor:
         ortho_loss = self.edit_module.compute_orthogonality_loss(prompt_emb)
         losses['ortho'] = ortho_loss
 
-        # 4. 局部性损失 (L_local) - only for backward samples
+        # 4. 范数约束损失 (L_norm) - 防止Over-injection
+        norm_loss = self.edit_module.compute_norm_constraint_loss(max_norm=10.0)
+        losses['norm'] = norm_loss
+
+        # 5. 局部性损失 (L_local) - only for backward samples
         if sample_type == 'backward':
             local_loss = self._compute_local_loss(edit_id, prompt)
             losses['local'] = local_loss
