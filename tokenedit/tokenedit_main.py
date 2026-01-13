@@ -735,14 +735,12 @@ class TokenEditEditor:
             )
 
             if subject_positions:
-                # 注入（传入初始序列长度，防止重复注入）
-                initial_seq_len = inputs['input_ids'].size(1)
+                # 注入
                 self.injector.inject(
                     self.model,
                     edit_id,
                     self.edit_module,
-                    subject_positions,
-                    initial_seq_len=initial_seq_len
+                    subject_positions
                 )
                 if verbose:
                     print(f"  注入位置: {subject_positions}")
