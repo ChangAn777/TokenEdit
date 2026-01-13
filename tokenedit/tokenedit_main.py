@@ -591,11 +591,18 @@ class TokenEditEditor:
             # 这样可以让训练继续进行
             return torch.tensor(0.1, device=self.device)
 
-        # 使用工具函数计算目标logits
+        # 计算���标token的损失
+        prompt_inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        target_tokens = self.tokenizer.encode(target, add_special_tokens=False)
+
+        if len(target_tokens) == 0:
+            return torch.tensor(0.1, device=self.device)
+
+        # 构造完整输入
         full_text = f"{prompt} {target}"
         inputs = self.tokenizer(full_text, return_tensors="pt").to(self.device)
 
-        # 注入编辑向量
+        # 注入编辑向���
         self.injector.inject(
             self.model,
             edit_id,
@@ -603,13 +610,29 @@ class TokenEditEditor:
             subject_positions
         )
 
-        # 前向传播 - 只计算目标token的损失
-        outputs = self.model(**inputs, labels=inputs['input_ids'])
+        # 前向传播
+        outputs = self.model(**inputs)
+        logits = outputs.logits[0]  # (seq_len, vocab_size)
+
+        # 计算目标token的范围
+        prompt_len = prompt_inputs['input_ids'].size(1)
+        target_logits = logits[prompt_len-1:prompt_len-1+len(target_tokens)]  # 目标token位置的logits
+
+        # 计算交叉熵损失（只对目标token）
+        loss = 0.0
+        for i, token_id in enumerate(target_tokens):
+            if i < len(target_logits):
+                loss += F.cross_entropy(
+                    target_logits[i].unsqueeze(0),
+                    torch.tensor([token_id], device=self.device)
+                )
+
+        loss = loss / len(target_tokens)  # 平均loss
 
         # 清除注入
         self.injector.clear()
 
-        return outputs.loss
+        return loss
     
     def _compute_suppress_loss(
         self,
