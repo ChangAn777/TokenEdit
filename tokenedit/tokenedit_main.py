@@ -34,27 +34,8 @@ class TokenEditEditor:
     """
     
     def __init__(self, model, tokenizer, hparams: TokenEditHyperParams):
-        # ==================== [核心修复] 强制锁定随机种子 ====================
-        import random
-        import numpy as np
-        
-        if hparams.seed is not None:
-            # 1. 锁定 Python 原生随机数
-            random.seed(hparams.seed)
-            # 2. 锁定 Numpy 随机数
-            np.random.seed(hparams.seed)
-            # 3. 锁定 PyTorch (CPU)
-            torch.manual_seed(hparams.seed)
-            # 4. 锁定 PyTorch (GPU)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(hparams.seed)
-                # 5. 强制 CuDNN 使用确定性算法 (虽牺牲微小性能，但保证可复现)
-                torch.backends.cudnn.deterministic = True
-                torch.backends.cudnn.benchmark = False
-                
-            if hparams.verbose:
-                print(f"强制固定随机种子: {hparams.seed}")
-        # ===================================================================
+        # 不再强制锁定种子，允许实验有随机性
+        # 如果需要可复现性，可以在调用代码中手动设置种子
 
         self.model = model
         self.tokenizer = tokenizer
