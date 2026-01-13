@@ -1,4 +1,10 @@
-"""层级注入器"""
+"""层级注入器
+
+修复版本 - 解决了:
+1. 输出格式处理更鲁棒
+2. 设备一致性检查
+3. 更安全的hook管理
+"""
 
 import torch
 from typing import List, Callable
@@ -58,12 +64,22 @@ class LayerInjector:
     
     def _injection_hook(self, module, input, output):
         """
-        Hook函数：修改隐藏状态
+        Hook函数: 修改隐藏状态
 
-        h'(s) = h(s) + α * v_new + β * v_old
+        h'(s) = h(s) + alpha * v_new + beta * v_old
+        
+        修复:
+        - 更鲁棒的输出格式处理
+        - 设备一致性检查
+        - 边界检查
         """
-        # output是一个tuple: (hidden_states, ...)
-        hidden_states = output[0]  # (batch_size, seq_len, hidden_size)
+        # 修复: 更安全的输出格式处理
+        if isinstance(output, tuple):
+            hidden_states = output[0]
+            other_outputs = output[1:]
+        else:
+            hidden_states = output
+            other_outputs = ()
 
         if self.active_edit_id is not None and self.edit_module is not None:
             # 获取编辑向量
@@ -71,21 +87,26 @@ class LayerInjector:
                 self.active_edit_id
             )
 
-            # 计算注入向量（确保是正确的形状）
+            # 计算注入向量(确保是正确的形状)
             inject_vector = alpha * v_new + beta * v_old  # (hidden_size,)
 
-            # 确保向量在正确的设备上
+            # 修复: 确保向量在正确的设备上
             inject_vector = inject_vector.to(hidden_states.device)
 
             # 只修改主体位置的表示
             for pos in self.subject_positions:
+                # 修复: 添加边界检查
                 if 0 <= pos < hidden_states.size(1):
                     # 广播注入向量到所有批次
                     hidden_states[:, pos, :] = (
                         hidden_states[:, pos, :] + inject_vector.unsqueeze(0)
                     )
 
-        return (hidden_states,) + output[1:]
+        # 修复: 正确返回输出格式
+        if isinstance(output, tuple):
+            return (hidden_states,) + other_outputs
+        else:
+            return hidden_states
     
     def clear(self):
         """清除所有hooks"""
