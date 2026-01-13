@@ -318,7 +318,7 @@ class TokenEditEditor:
                             self.hparams.w_edit * edit_loss +
                             self.hparams.w_suppress * suppress_loss +
                             self.hparams.w_ortho * ortho_loss +
-                            0.1 * norm_loss  # 范数约束权重
+                            1.0 * norm_loss  # 增加范数约束权重（从0.1到1.0）
                         )
 
                         # Stats
@@ -346,7 +346,7 @@ class TokenEditEditor:
                         sample_loss = (
                             self.hparams.w_local * local_loss +
                             self.hparams.w_ortho * ortho_loss +
-                            0.1 * norm_loss
+                            1.0 * norm_loss  # 增加范数约束权重
                         )
 
                         # Stats
@@ -378,6 +378,22 @@ class TokenEditEditor:
                     )
 
                     optimizer.step()
+
+                    # 【关键】参数裁剪 - 防止over-injection
+                    # 直接限制v_new范数和alpha，而不是通过loss约束
+                    with torch.no_grad():
+                        # 1. 裁剪v_new的范数
+                        if not self.hparams.use_low_rank:
+                            v_new_norms = torch.norm(self.edit_module.v_new, dim=-1)
+                            max_v_norm = 5.0  # 更严格的限制
+                            scale = torch.clamp(max_v_norm / (v_new_norms + 1e-8), max=1.0)
+                            self.edit_module.v_new.data *= scale.unsqueeze(-1)
+
+                        # 2. 裁剪alpha和beta（防止极端放大）
+                        max_alpha = 2.0  # 更严格的限制
+                        self.edit_module.alpha.data = torch.clamp(self.edit_module.alpha.data, -max_alpha, max_alpha)
+                        self.edit_module.beta.data = torch.clamp(self.edit_module.beta.data, -max_alpha, max_alpha)
+
                     optimizer.zero_grad()
                     accumulated_loss = 0.0
 
