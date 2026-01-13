@@ -276,14 +276,7 @@ class TokenEditEditor:
 
         print(f"✓ Pre-computed {sum(len(v) for v in prompt_embeddings_cache.values())} prompt embeddings")
 
-        # 【优化】Early stopping配置
-        patience = 30  # 如果loss连续30个epoch没有改善，则停止
-        min_delta = 1e-4  # 认为loss改善的最小阈值
-        min_epochs = 50  # 至少训练50个epoch才允许early stopping
-        best_loss = float('inf')
-        patience_counter = 0
-
-        # 训练循环 - 使用缓存的prompt embeddings + Early stopping
+        # 训练循环 - 使用缓存的prompt embeddings
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
             epoch_breakdown = {k: 0.0 for k in stats['loss_breakdown'].keys()}
@@ -434,13 +427,6 @@ class TokenEditEditor:
                         epoch_breakdown[k] / total_prompts
                     )
 
-                # 【优化】Early stopping检查
-                if current_loss < best_loss - min_delta:
-                    best_loss = current_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-
             # 打印进度
             if (epoch + 1) % 10 == 0 and self.hparams.verbose:
                 print(f"\nEpoch {epoch+1}/{self.hparams.num_epochs}")
@@ -449,15 +435,6 @@ class TokenEditEditor:
                 print(f"  Suppress: {stats['loss_breakdown']['suppress'][-1]:.4f}")
                 print(f"  Ortho: {stats['loss_breakdown']['ortho'][-1]:.4f}")
                 print(f"  Local: {stats['loss_breakdown']['local'][-1]:.4f}")
-                print(f"  Best Loss: {best_loss:.4f} | Patience: {patience_counter}/{patience}")
-
-            # 【优化】触发early stopping（需要满足最小epoch要求）
-            if patience_counter >= patience and (epoch + 1) >= min_epochs:
-                if self.hparams.verbose:
-                    print(f"\n✓ Early stopping triggered at epoch {epoch+1}")
-                    print(f"  Best loss: {best_loss:.4f}")
-                    print(f"  No improvement for {patience} consecutive epochs")
-                break
 
         return stats
     
