@@ -32,7 +32,7 @@ except ImportError as e:
 
 def _json_default(o: Any):
     """Convert numpy types to Python native types for JSON serialization."""
-    if isinstance(o, (np.bool_, np.bool8)):
+    if isinstance(o, np.bool_):
         return bool(o)
     if isinstance(o, (np.integer,)):
         return int(o)

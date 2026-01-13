@@ -6,7 +6,7 @@
     "learnable_gates": true,
     "use_low_rank": false,
     "token_rank": 64,
-    "num_epochs": 20,
+    "num_epochs": 40,
     "learning_rate": 0.001,
     "batch_size": 1,
     "optimizer": "adam",
