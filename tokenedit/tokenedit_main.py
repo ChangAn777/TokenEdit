@@ -174,7 +174,8 @@ class TokenEditEditor:
             self.router.register_edit(
                 i,
                 req['subject'],
-                req.get('relation_id', req.get('relation', 'unknown'))  # 优先使用 relation_id
+                req.get('relation_id', req.get('relation', 'unknown')),  # 优先使用 relation_id
+                req.get('prompt')  # 传入原始prompt template
             )
             self.edits_registry[i] = req
         
