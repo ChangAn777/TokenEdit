@@ -241,39 +241,7 @@ class TokenEditEditor:
             }
         }
 
-        # 【优化】在训练开始前一次性计算所有prompt embeddings
-        # 避免在每个epoch中重复计算
-        print("Pre-computing prompt embeddings...")
-        prompt_embeddings_cache = {}
-
-        for data in train_data:
-            edit_id = data['edit_id']
-            closure = data['closure']
-
-            if edit_id not in prompt_embeddings_cache:
-                prompt_embeddings_cache[edit_id] = {}
-
-            # 预计算所有forward prompts的embeddings
-            for prompt in closure.get('prompts_forward', []):
-                if prompt not in prompt_embeddings_cache[edit_id]:
-                    inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-                    with torch.no_grad():
-                        outputs = self.model(**inputs, output_hidden_states=True)
-                        prompt_emb = outputs.hidden_states[-1].mean(dim=1)
-                    prompt_embeddings_cache[edit_id][prompt] = prompt_emb.clone()
-
-            # 预计算所有backward prompts的embeddings
-            for prompt in closure.get('prompts_backward', []):
-                if prompt not in prompt_embeddings_cache[edit_id]:
-                    inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-                    with torch.no_grad():
-                        outputs = self.model(**inputs, output_hidden_states=True)
-                        prompt_emb = outputs.hidden_states[-1].mean(dim=1)
-                    prompt_embeddings_cache[edit_id][prompt] = prompt_emb.clone()
-
-        print(f"✓ Pre-computed {sum(len(v) for v in prompt_embeddings_cache.values())} prompt embeddings")
-
-        # 训练循环 - 使用缓存的prompt embeddings
+        # 训练循环
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
             epoch_breakdown = {k: 0.0 for k in stats['loss_breakdown'].keys()}
@@ -304,9 +272,8 @@ class TokenEditEditor:
                     })
 
             # 超大批量处理 + 梯度累积
-            # 一次性处理更多样本，减少optimizer.step()频率
             accumulation_steps = 10  # 累积10个batch的梯度再更新
-            batch_size = 200  # 每个batch处理200个prompts
+            batch_size = 50  # 每个batch处理50个prompts（降低以避免梯度爆炸）
 
             optimizer.zero_grad()
             accumulated_loss = 0.0
@@ -315,7 +282,7 @@ class TokenEditEditor:
                 batch_end = min(batch_start + batch_size, len(all_training_samples))
                 batch_samples = all_training_samples[batch_start:batch_end]
 
-                # 计算每个样本的损失（使用缓存的prompt embeddings）
+                # 计算每个样本的损失
                 batch_loss = 0.0
 
                 for sample in batch_samples:
@@ -324,12 +291,9 @@ class TokenEditEditor:
                     sample_type = sample['type']
                     closure = sample['closure']
 
-                    # 【优化】从缓存中获取预计算的prompt embedding
-                    prompt_emb = prompt_embeddings_cache[edit_id][prompt]
-
-                    # 使用缓存的prompt embedding计算损失
-                    losses = self._compute_sample_loss_with_emb(
-                        edit_id, prompt_emb, sample_type, closure
+                    # 直接计算损失
+                    losses = self._compute_sample_loss(
+                        edit_id, prompt, sample_type, closure
                     )
 
                     # 根据类型组合损失
