@@ -237,18 +237,24 @@ def compute_batch_rewrite_quality(
         paraphrase_prompts = record.get('paraphrase_prompts', [])[:5]
         neighborhood_prompts = record.get('neighborhood_prompts', [])[:5]
 
+        # Handle neighborhood_prompts format (could be list of strings or list of dicts)
+        if neighborhood_prompts and isinstance(neighborhood_prompts[0], dict):
+            neighborhood_prompts_list = [nb['prompt'] for nb in neighborhood_prompts]
+        else:
+            neighborhood_prompts_list = neighborhood_prompts
+
         # Collect all prompts
         test_prompts = [
             [rewrite_prompt],  # rewrite_prompts
             paraphrase_prompts,  # paraphrase_prompts
-            [nb['prompt'] for nb in neighborhood_prompts]  # neighborhood_prompts
+            neighborhood_prompts_list  # neighborhood_prompts
         ]
 
         # Mark correct targets
         which_correct = [
             [0],  # rewrite: target_new
             [0] * len(paraphrase_prompts),  # paraphrase: target_new
-            [1] * len(neighborhood_prompts),  # neighborhood: target_true
+            [1] * len(neighborhood_prompts_list),  # neighborhood: target_true
         ]
 
         # Flatten
