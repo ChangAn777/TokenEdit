@@ -75,10 +75,10 @@ def test_single_edit(editor, request, test_cases):
         edit_id = editor.router.route(prompt, prompt_emb)
         if edit_id is not None:
             req = editor.edits_registry[edit_id]
-            print(f"  ✓ 路由命中: edit #{edit_id}")
+            print(f"  [OK] Route hit: edit #{edit_id}")
             print(f"    Subject: {req['subject']} -> {req['target_new']}")
         else:
-            print(f"  ✗ 路由未命中")
+            print(f"  [X] Route miss")
 
         # 生成输出
         output = editor.inference(prompt, max_new_tokens=15, verbose=False)
@@ -88,9 +88,9 @@ def test_single_edit(editor, request, test_cases):
         success = expected in output
         old_answer = request['target_true'] in output
 
-        print(f"  结果:")
-        print(f"    包含预期答案 '{expected}': {'✓' if success else '✗'}")
-        print(f"    包含旧答案 '{request['target_true']}': {'✓' if old_answer else '✗'}")
+        print(f"  Results:")
+        print(f"    Contains expected '{expected}': {'[OK]' if success else '[X]'}")
+        print(f"    Contains old answer '{request['target_true']}': {'[OK]' if old_answer else '[X]'}")
 
         # 计算概率
         targets = [request['target_new'], request['target_true']]

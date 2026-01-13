@@ -99,7 +99,7 @@ def load_model_optimized(model_name: str, device_id=0):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"✓ 模型加载完成")
+    print(f"[OK] Model loaded successfully")
     print(f"  设备: {device}")
 
     # 显示显存占用
