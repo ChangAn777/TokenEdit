@@ -34,8 +34,16 @@ class TokenEditEditor:
     """
     
     def __init__(self, model, tokenizer, hparams: TokenEditHyperParams):
-        # 不再强制锁定种子，允许实验有随机性
-        # 如果需要可复现性，可以在调用代码中手动设置种子
+        # 重新锁定种子以保证可复现性
+        import random
+        import numpy as np
+
+        if hparams.seed is not None:
+            random.seed(hparams.seed)
+            np.random.seed(hparams.seed)
+            torch.manual_seed(hparams.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(hparams.seed)
 
         self.model = model
         self.tokenizer = tokenizer
@@ -233,11 +241,10 @@ class TokenEditEditor:
             }
         }
 
-        # 【优化】在训练开始前一次性计算所有prompt embeddings和tokenization
+        # 【优化】在训练开始前一次性计算所有prompt embeddings
         # 避免在每个epoch中重复计算
-        print("Pre-computing prompt embeddings and tokenizations...")
+        print("Pre-computing prompt embeddings...")
         prompt_embeddings_cache = {}
-        tokenizer_cache = {}  # 新增：缓存tokenization结果
 
         for data in train_data:
             edit_id = data['edit_id']
@@ -245,30 +252,20 @@ class TokenEditEditor:
 
             if edit_id not in prompt_embeddings_cache:
                 prompt_embeddings_cache[edit_id] = {}
-            if edit_id not in tokenizer_cache:
-                tokenizer_cache[edit_id] = {}
 
-            # 预计算所有forward prompts的embeddings和tokenization
+            # 预计算所有forward prompts的embeddings
             for prompt in closure.get('prompts_forward', []):
                 if prompt not in prompt_embeddings_cache[edit_id]:
                     inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-                    tokenizer_cache[edit_id][prompt] = {
-                        'input_ids': inputs['input_ids'].clone(),
-                        'attention_mask': inputs['attention_mask'].clone()
-                    }
                     with torch.no_grad():
                         outputs = self.model(**inputs, output_hidden_states=True)
                         prompt_emb = outputs.hidden_states[-1].mean(dim=1)
                     prompt_embeddings_cache[edit_id][prompt] = prompt_emb.clone()
 
-            # 预计算所有backward prompts的embeddings和tokenization
+            # 预计算所有backward prompts的embeddings
             for prompt in closure.get('prompts_backward', []):
                 if prompt not in prompt_embeddings_cache[edit_id]:
                     inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-                    tokenizer_cache[edit_id][prompt] = {
-                        'input_ids': inputs['input_ids'].clone(),
-                        'attention_mask': inputs['attention_mask'].clone()
-                    }
                     with torch.no_grad():
                         outputs = self.model(**inputs, output_hidden_states=True)
                         prompt_emb = outputs.hidden_states[-1].mean(dim=1)
@@ -330,9 +327,9 @@ class TokenEditEditor:
                     # 【优化】从缓存中获取预计算的prompt embedding
                     prompt_emb = prompt_embeddings_cache[edit_id][prompt]
 
-                    # 使用缓存的prompt embedding和tokenizer计算损失
+                    # 使用缓存的prompt embedding计算损失
                     losses = self._compute_sample_loss_with_emb(
-                        edit_id, prompt_emb, sample_type, closure, tokenizer_cache
+                        edit_id, prompt_emb, sample_type, closure
                     )
 
                     # 根据类型组合损失
@@ -507,8 +504,7 @@ class TokenEditEditor:
         edit_id: int,
         prompt_emb: torch.Tensor,  # 预先计算好的prompt embedding [1, hidden_dim]
         sample_type: str,
-        closure: Dict,
-        tokenizer_cache: Dict  # 新增：tokenization缓存
+        closure: Dict
     ) -> Dict[str, torch.Tensor]:
         """
         使用预先计算的prompt embedding计算损失
@@ -540,14 +536,14 @@ class TokenEditEditor:
 
         # 1. 编辑成功损失 (L_edit) - only for forward samples
         if sample_type == 'forward' and target:
-            edit_loss = self._compute_edit_loss(edit_id, prompt, target, tokenizer_cache)
+            edit_loss = self._compute_edit_loss(edit_id, prompt, target)
             losses['edit'] = edit_loss
         else:
             losses['edit'] = torch.tensor(0.0, device=self.device)
 
         # 2. 反事实抑制损失 (L_suppress) - only for forward samples
         if sample_type == 'forward' and old_target:
-            suppress_loss = self._compute_suppress_loss(edit_id, prompt, old_target, tokenizer_cache)
+            suppress_loss = self._compute_suppress_loss(edit_id, prompt, old_target)
             losses['suppress'] = suppress_loss
         else:
             losses['suppress'] = torch.tensor(0.0, device=self.device)
@@ -558,7 +554,7 @@ class TokenEditEditor:
 
         # 4. 局部性损失 (L_local) - only for backward samples
         if sample_type == 'backward':
-            local_loss = self._compute_local_loss(edit_id, prompt, tokenizer_cache)
+            local_loss = self._compute_local_loss(edit_id, prompt)
             losses['local'] = local_loss
         else:
             losses['local'] = torch.tensor(0.0, device=self.device)
@@ -569,8 +565,7 @@ class TokenEditEditor:
         self,
         edit_id: int,
         prompt: str,
-        target: str,
-        tokenizer_cache: Dict  # 新增参数
+        target: str
     ) -> torch.Tensor:
         """
         计算编辑成功损失（交叉熵）
@@ -591,23 +586,7 @@ class TokenEditEditor:
 
         # 使用工具函数计算目标logits
         full_text = f"{prompt} {target}"
-
-        # 【优化】优先使用缓存的tokenization
-        if prompt in tokenizer_cache.get(edit_id, {}):
-            # 获取缓存的prompt tokenization
-            cached = tokenizer_cache[edit_id][prompt]
-            # 拼接target的tokens
-            target_tokens = self.tokenizer.encode(target, add_special_tokens=False)
-            prompt_input_ids = cached['input_ids'][0]
-            combined_ids = torch.cat([prompt_input_ids, torch.tensor(target_tokens, device=self.device)]).unsqueeze(0)
-
-            inputs = {
-                'input_ids': combined_ids,
-                'attention_mask': torch.ones_like(combined_ids)
-            }
-        else:
-            # Fallback to normal tokenization
-            inputs = self.tokenizer(full_text, return_tensors="pt").to(self.device)
+        inputs = self.tokenizer(full_text, return_tensors="pt").to(self.device)
 
         # 注入编辑向量
         self.injector.inject(
@@ -629,8 +608,7 @@ class TokenEditEditor:
         self,
         edit_id: int,
         prompt: str,
-        old_target: str,
-        tokenizer_cache: Dict  # 新增参数
+        old_target: str
     ) -> torch.Tensor:
         """
         计算反事实抑制损失（Unlikelihood Loss）
@@ -638,12 +616,8 @@ class TokenEditEditor:
 
         L_suppress = -log(1 - P(old_target | prompt))
         """
-        # 【优化】使用缓存的tokenization
-        if prompt in tokenizer_cache.get(edit_id, {}):
-            inputs = tokenizer_cache[edit_id][prompt]
-        else:
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-
+        # 编码
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         old_tokens = self.tokenizer.encode(old_target, add_special_tokens=False)
         
         if len(old_tokens) == 0:
@@ -684,8 +658,7 @@ class TokenEditEditor:
     def _compute_local_loss(
         self,
         edit_id: int,
-        prompt: str,
-        tokenizer_cache: Dict  # 新增参数
+        prompt: str
     ) -> torch.Tensor:
         """
         计算局部性损失（KL散度）
