@@ -341,7 +341,9 @@ def test_batch_prediction_multi(
     """
     ULTRA-FAST batch prediction for multiple samples with different targets
 
-    This processes ALL prompts for ALL samples in a SINGLE forward pass!
+    FIXED VERSION: Now properly injects edit vectors during evaluation!
+
+    This processes ALL prompts for ALL samples with proper edit injection.
 
     Args:
         editor: TokenEdit editor
@@ -352,37 +354,66 @@ def test_batch_prediction_multi(
     Returns:
         (probs, targets_correct) tuple
     """
-    # Prepare all inputs
-    all_texts = []
-    for prefix, target_new, target_true in zip(prefixes, targets_new, targets_true):
-        all_texts.append(f"{prefix} {target_new}")
-        all_texts.append(f"{prefix} {target_true}")
-
-    # Tokenize all at once (HUGE batch!)
-    all_inputs = editor.tokenizer(all_texts, padding=True, return_tensors="pt").to(editor.device)
-
-    # Get prefix lengths
-    prefix_lens = [len(editor.tokenizer(prefix)["input_ids"]) for prefix in prefixes]
-
-    # Single MASSIVE batch forward pass
-    with torch.no_grad():
-        outputs = editor.model(**all_inputs)
-        all_logits = outputs.logits
-
     # Extract probabilities
     probs = []
     targets_correct = []
 
+    print(f"[DEBUG] Evaluating {len(prefixes)} prompts with edit injection...")
+
     for i, (prefix, target_new, target_true) in enumerate(zip(prefixes, targets_new, targets_true)):
-        prefix_len = prefix_lens[i]
+        # === CRITICAL: Use proper edit injection ===
+        # 1. Get prompt embedding for routing
+        inputs = editor.tokenizer(prefix, return_tensors="pt", add_special_tokens=True).to(editor.device)
+
+        with torch.no_grad():
+            outputs = editor.model(**inputs, output_hidden_states=True)
+            prompt_emb = outputs.hidden_states[-1].mean(dim=1)
+
+        # 2. Route to detect which edit to apply
+        edit_id = editor.router.route(prefix, prompt_emb)
+
+        # 3. Find subject positions and inject edit if triggered
+        injection_success = False
+        if edit_id is not None:
+            req = editor.edits_registry[edit_id]
+            subject_positions = editor.utils.find_subject_positions(
+                prefix,
+                req['subject'],
+                verbose=False,
+                add_special_tokens=True
+            )
+
+            if subject_positions:
+                editor.injector.inject(
+                    editor.model,
+                    edit_id,
+                    editor.edit_module,
+                    subject_positions
+                )
+                injection_success = True
+
+        # 4. Prepare inputs for both target_new and target_true
+        all_texts = [f"{prefix} {target_new}", f"{prefix} {target_true}"]
+        all_inputs = editor.tokenizer(all_texts, padding=True, return_tensors="pt").to(editor.device)
+
+        # Get prefix length
+        prefix_len = len(editor.tokenizer(prefix, add_special_tokens=True)["input_ids"])
 
         # Tokenize targets
         target_new_tokens = editor.tokenizer(target_new, add_special_tokens=False)["input_ids"]
         target_true_tokens = editor.tokenizer(target_true, add_special_tokens=False)["input_ids"]
 
-        # Get logits
-        logits_new = all_logits[i * 2]
-        logits_true = all_logits[i * 2 + 1]
+        # 5. Forward pass WITH edit injection
+        with torch.no_grad():
+            outputs = editor.model(**all_inputs)
+            all_logits = outputs.logits
+
+        # 6. Clear injection
+        editor.injector.clear()
+
+        # 7. Compute probabilities
+        logits_new = all_logits[0]
+        logits_true = all_logits[1]
 
         # Compute probability for target_new
         log_probs_new = []
@@ -413,6 +444,11 @@ def test_batch_prediction_multi(
         is_correct = prob_new > prob_true
         targets_correct.append(is_correct)
 
+        # Debug output for first few samples
+        if i < 3:
+            print(f"[DEBUG] Sample {i}: edit_id={edit_id}, injected={injection_success}, "
+                  f"prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, correct={is_correct}")
+
     return probs, targets_correct
 
 
@@ -424,9 +460,9 @@ def test_batch_prediction(
     target_true: str,
 ) -> tuple:
     """
-    Test batch prediction - OPTIMIZED VERSION
+    Test batch prediction - FIXED VERSION WITH EDIT INJECTION
 
-    Key optimization: Process all prefixes in batches
+    Now properly injects edit vectors during evaluation!
 
     Args:
         editor: TokenEdit editor
@@ -442,33 +478,60 @@ def test_batch_prediction(
     target_new_tokens = editor.tokenizer(target_new, add_special_tokens=False)["input_ids"]
     target_true_tokens = editor.tokenizer(target_true, add_special_tokens=False)["input_ids"]
 
-    # Prepare all inputs
-    all_texts = []
-    for prefix in prefixes:
-        all_texts.append(f"{prefix} {target_new}")
-        all_texts.append(f"{prefix} {target_true}")
-
-    # Tokenize all at once
-    all_inputs = editor.tokenizer(all_texts, padding=True, return_tensors="pt").to(editor.device)
-
-    # Get prefix lengths
-    prefix_lens = [len(editor.tokenizer(prefix)["input_ids"]) for prefix in prefixes]
-
-    # Single batch forward pass
-    with torch.no_grad():
-        outputs = editor.model(**all_inputs)
-        all_logits = outputs.logits
-
     # Extract probabilities
     probs = []
     targets_correct = []
 
     for i, prefix in enumerate(prefixes):
-        prefix_len = prefix_lens[i]
+        # === CRITICAL: Use proper edit injection ===
+        # 1. Get prompt embedding for routing
+        inputs = editor.tokenizer(prefix, return_tensors="pt", add_special_tokens=True).to(editor.device)
 
-        # Get logits for target_new and target_true
-        logits_new = all_logits[i * 2]
-        logits_true = all_logits[i * 2 + 1]
+        with torch.no_grad():
+            outputs = editor.model(**inputs, output_hidden_states=True)
+            prompt_emb = outputs.hidden_states[-1].mean(dim=1)
+
+        # 2. Route to detect which edit to apply
+        edit_id = editor.router.route(prefix, prompt_emb)
+
+        # 3. Find subject positions and inject edit if triggered
+        injection_success = False
+        if edit_id is not None:
+            req = editor.edits_registry[edit_id]
+            subject_positions = editor.utils.find_subject_positions(
+                prefix,
+                req['subject'],
+                verbose=False,
+                add_special_tokens=True
+            )
+
+            if subject_positions:
+                editor.injector.inject(
+                    editor.model,
+                    edit_id,
+                    editor.edit_module,
+                    subject_positions
+                )
+                injection_success = True
+
+        # 4. Prepare inputs for both targets
+        all_texts = [f"{prefix} {target_new}", f"{prefix} {target_true}"]
+        all_inputs = editor.tokenizer(all_texts, padding=True, return_tensors="pt").to(editor.device)
+
+        # Get prefix length
+        prefix_len = len(editor.tokenizer(prefix, add_special_tokens=True)["input_ids"])
+
+        # 5. Forward pass WITH edit injection
+        with torch.no_grad():
+            outputs = editor.model(**all_inputs)
+            all_logits = outputs.logits
+
+        # 6. Clear injection
+        editor.injector.clear()
+
+        # 7. Extract probabilities
+        logits_new = all_logits[0]
+        logits_true = all_logits[1]
 
         # Compute probability for target_new
         log_probs_new = []
