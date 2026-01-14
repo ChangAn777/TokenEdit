@@ -363,6 +363,9 @@ def test_batch_prediction_multi(
     targets_correct = []
 
     print(f"[DEBUG] Evaluating {len(prefixes)} prompts with edit injection...")
+    print(f"[DEBUG] Router has {len(editor.router.edit_embeddings)} registered edits")
+    print(f"[DEBUG] Router threshold: {editor.hparams.routing_threshold}")
+    print(f"[DEBUG] use_embedding_routing: {editor.hparams.use_embedding_routing}")
 
     for i, (prefix, target_new, target_true) in enumerate(zip(prefixes, targets_new, targets_true)):
         # === CRITICAL: Use proper edit injection ===
@@ -713,6 +716,11 @@ def evaluate_model(
 
     # Evaluate with BATCHING
     print(f"\n[Evaluating] Computing rewrite quality metrics (batch_size={eval_batch_size})...")
+    print(f"[DEBUG-BEFORE-EVAL] Router has {len(editor.router.edit_embeddings)} registered edits", flush=True)
+    print(f"[DEBUG-BEFORE-EVAL] edits_registry has {len(editor.edits_registry)} edits", flush=True)
+    print(f"[DEBUG-BEFORE-EVAL] edit_module is None: {editor.edit_module is None}", flush=True)
+    if editor.edit_module is not None:
+        print(f"[DEBUG-BEFORE-EVAL] edit_module.alpha: {editor.edit_module.alpha}", flush=True)
 
     results = []
     efficacy_list = []
