@@ -282,7 +282,8 @@ def compute_batch_rewrite_quality(
         editor,
         all_prompts,
         all_targets_new,
-        all_targets_true
+        all_targets_true,
+        all_correct  # CRITICAL: Pass which target is correct!
     )
 
     # Reorganize results by record
@@ -337,6 +338,7 @@ def test_batch_prediction_multi(
     prefixes: List[str],
     targets_new: List[str],
     targets_true: List[str],
+    which_correct: List[int] = None,
 ) -> tuple:
     """
     ULTRA-FAST batch prediction for multiple samples with different targets
@@ -350,6 +352,8 @@ def test_batch_prediction_multi(
         prefixes: List of all test prompts
         targets_new: List of target_new strings (one per prefix)
         targets_true: List of target_true strings (one per prefix)
+        which_correct: List of 0/1 indicating which target is correct
+                       0 = target_new, 1 = target_true
 
     Returns:
         (probs, targets_correct) tuple
@@ -440,13 +444,19 @@ def test_batch_prediction_multi(
             "target_true": prob_true
         })
 
-        # Check if correct (assume should predict target_new for now)
-        is_correct = prob_new > prob_true
+        # Check if correct based on which_correct parameter
+        if which_correct is not None and i < len(which_correct):
+            # 0 = should predict target_new, 1 = should predict target_true
+            is_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
+        else:
+            # Default: assume should predict target_new
+            is_correct = prob_new > prob_true
         targets_correct.append(is_correct)
 
         # Debug output for all samples (removed limit)
         print(f"[DEBUG] Sample {i}: edit_id={edit_id}, injected={injection_success}, "
-              f"prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, correct={is_correct}")
+              f"prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, "
+              f"expected={'new' if (which_correct is None or which_correct[i] == 0) else 'true'}, correct={is_correct}")
 
     return probs, targets_correct
 
