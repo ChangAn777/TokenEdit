@@ -606,11 +606,16 @@ class TokenEditEditor:
             if len(log_probs) == 0:
                 return torch.tensor(0.0, device=self.device)
             
-            # 联合log概率
+            # 联合log概率: log(P(old))
             joint_log_prob = sum(log_probs) / len(log_probs)
-            
-            # Unlikelihood loss: 最小化log(P(old))
-            loss = joint_log_prob
+
+            # 严格按照设计公式: L_supp = -log(1 - P(old))
+            # 先将log概率转换回概率
+            prob_old = torch.exp(joint_log_prob)
+
+            # 计算 -log(1 - P(old))
+            # 添加eps避免log(0)的数值问题
+            loss = -torch.log(1.0 - prob_old + 1e-10)
             
         finally:
             self.injector.clear()
