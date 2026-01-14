@@ -117,14 +117,15 @@ class PromptRouter:
                 # 修复1: 阈值从0.3提高到0.7(使用JSON配置的routing_threshold)
                 if best_sim < self.hparams.routing_threshold:
                     return None
-                
-                # 修复2: 拒绝区域 - 如果top2相似度太接近,拒绝(避免歧义)
+
+                # 修复2: 智能拒绝区域 - 只在真正歧义时拒绝
+                # 只有当两者都很高且差距小时才认为是歧义
                 sorted_sims = sorted(similarities.values(), reverse=True)
                 if len(sorted_sims) > 1:
                     second_best_sim = sorted_sims[1]
-                    # 如果差距小于0.1,认为太接近,拒绝
-                    if best_sim - second_best_sim < 0.1:
-                        return None
+                    if best_sim > 0.5 and second_best_sim > 0.4:
+                        if best_sim - second_best_sim < 0.1:
+                            return None  # 真正的歧义情况
                 
                 # 修复3: 主体匹配作为必要条件
                 info = self.edit_info[best_edit_id]
