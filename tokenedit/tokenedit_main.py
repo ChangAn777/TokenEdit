@@ -345,10 +345,10 @@ class TokenEditEditor:
             optimizer.step()
             
             # 关键修复: 强制参数裁剪,防止over-injection
-            # 注意: 阈��太大会限制编辑效果，太小会导致over-injection
+            # 注意: 阈值太大会限制编辑效果，太小会导致over-injection
             with torch.no_grad():
-                max_v_norm = 10.0   # 从2.0增加到10.0
-                max_alpha = 5.0     # 从2.0增加到5.0     
+                max_v_norm = 2.0   # 强范数约束,防止过度注入
+                max_alpha = 2.0    # 强alpha约束,防止过度缩放     
                 
                 # 裁剪v_new和v_old的范数
                 if not self.hparams.use_low_rank:

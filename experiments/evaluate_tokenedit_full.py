@@ -444,10 +444,9 @@ def test_batch_prediction_multi(
         is_correct = prob_new > prob_true
         targets_correct.append(is_correct)
 
-        # Debug output for first few samples
-        if i < 3:
-            print(f"[DEBUG] Sample {i}: edit_id={edit_id}, injected={injection_success}, "
-                  f"prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, correct={is_correct}")
+        # Debug output for all samples (removed limit)
+        print(f"[DEBUG] Sample {i}: edit_id={edit_id}, injected={injection_success}, "
+              f"prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, correct={is_correct}")
 
     return probs, targets_correct
 
