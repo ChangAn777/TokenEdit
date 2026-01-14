@@ -127,11 +127,22 @@ class PromptRouter:
                         if best_sim - second_best_sim < 0.1:
                             return None  # 真正的歧义情况
                 
-                # 修复3: 主体匹配作为必要条件
+                # 修复3: 主体匹配 - 放宽条件，允许部分匹配
                 info = self.edit_info[best_edit_id]
-                if info['subject'].lower() not in prompt.lower():
-                    return None  # 主体不在prompt中,拒绝
-                
+                subject = info['subject'].lower()
+                prompt_lower = prompt.lower()
+
+                # 检查完整主体或主体的主要部分是否在prompt中
+                subject_words = subject.split()
+                subject_in_prompt = (
+                    subject in prompt_lower or  # 完整匹配
+                    any(word in prompt_lower for word in subject_words if len(word) > 3)  # 部分匹配（长度>3的词）
+                )
+
+                # 如果相似度很高(>0.8)，即使主体不完全匹配也允许
+                if not subject_in_prompt and best_sim < 0.8:
+                    return None
+
                 return best_edit_id
 
         # 方法2: 主体匹配(辅助方法,不依赖硬编码关系模板)
