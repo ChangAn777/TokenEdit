@@ -140,6 +140,7 @@ class TokenEditEditor:
             print(f"\n{'='*60}")
             print(f"开始编辑 {num_edits} 个知识点")
             print(f"{'='*60}")
+            print(f"[DEBUG] requests count: {len(requests)}")
         
         # 1. 初始化EditToken模块
         if self.hparams.verbose:
@@ -153,6 +154,12 @@ class TokenEditEditor:
         
         if self.hparams.verbose:
             print(f"  [SUCCESS] 创建了 {num_edits} 对Token (v_new, v_old)")
+            try:
+                alpha_mean = self.edit_module.alpha.mean().item()
+                v_new_norm = self.edit_module.get_edit_vectors(0)[0].norm().item()
+                print(f"  [DEBUG] init alpha_mean={alpha_mean:.6f} v_new_norm={v_new_norm:.6f}")
+            except Exception as e:
+                print(f"  [DEBUG] failed to read init edit params: {e}")
         
         # 2. 生成Prompt闭包训练数据
         if self.hparams.verbose:
@@ -382,6 +389,12 @@ class TokenEditEditor:
                     print(f"  Local: {stats['loss_breakdown']['local'][-1]:.4f}")
                 if len(stats['loss_breakdown']['norm']) > 0:
                     print(f"  Norm: {stats['loss_breakdown']['norm'][-1]:.4f}")
+                try:
+                    alpha_mean = self.edit_module.alpha.mean().item()
+                    v_new_norm = self.edit_module.get_edit_vectors(0)[0].norm().item()
+                    print(f"  [DEBUG] alpha_mean={alpha_mean:.6f} v_new_norm={v_new_norm:.6f}")
+                except Exception as e:
+                    print(f"  [DEBUG] failed to read edit params: {e}")
             
             # 清理内存
             torch.cuda.empty_cache()
