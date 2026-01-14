@@ -622,7 +622,7 @@ def evaluate_model(
         hparams.num_epochs = num_epochs
 
     hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
-    hparams.verbose = False
+    hparams.verbose = True
 
     editor = TokenEditEditor(model, tokenizer, hparams)
 
