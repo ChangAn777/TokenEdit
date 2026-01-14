@@ -41,7 +41,7 @@ class TokenEditEditor:
     """
     
     def __init__(self, model, tokenizer, hparams: TokenEditHyperParams):
-        # 重新锚定种子以保证可复现性
+        # 设置随机种子（如果指定）
         import random
         import numpy as np
 
@@ -51,6 +51,16 @@ class TokenEditEditor:
             torch.manual_seed(hparams.seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(hparams.seed)
+            print(f"[INFO] 使用固定种子: {hparams.seed}")
+        else:
+            # 使用随机种子，让每次实验不同
+            actual_seed = random.randint(0, 2**32 - 1)
+            random.seed(actual_seed)
+            np.random.seed(actual_seed)
+            torch.manual_seed(actual_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(actual_seed)
+            print(f"[INFO] 使用随机种子: {actual_seed}")
 
         self.model = model
         self.tokenizer = tokenizer
