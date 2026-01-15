@@ -109,39 +109,34 @@ class PromptRouter:
                 ).item()
                 similarities[edit_id] = sim
 
-            # 修复: 提高阈值 + 添加拒绝区域
+            # 先检查是否有主体匹配
+            subject_matched_edit = None
+            for edit_id, info in self.edit_info.items():
+                subject = info['subject'].lower()
+                if subject in prompt.lower():
+                    subject_matched_edit = edit_id
+                    break
+
+            # 如果有主体匹配，直接返回（不检查阈值）
+            if subject_matched_edit is not None:
+                return subject_matched_edit
+
+            # 否则使用相似度路由
             if similarities:
                 best_edit_id = max(similarities, key=similarities.get)
                 best_sim = similarities[best_edit_id]
-                
-                # 修复1: 阈值从0.3提高到0.7(使用JSON配置的routing_threshold)
+
+                # 阈值检查
                 if best_sim < self.hparams.routing_threshold:
                     return None
 
-                # 修复2: 智能拒绝区域 - 只在真正歧义时拒绝
-                # 只有当两者都很高且差距小时才认为是歧义
+                # 拒绝区域 - 只在真正歧义时拒绝
                 sorted_sims = sorted(similarities.values(), reverse=True)
                 if len(sorted_sims) > 1:
                     second_best_sim = sorted_sims[1]
                     if best_sim > 0.5 and second_best_sim > 0.4:
                         if best_sim - second_best_sim < 0.1:
-                            return None  # 真正的歧义情况
-                
-                # 修复3: 主体匹配 - 放宽条件，允许部分匹配
-                info = self.edit_info[best_edit_id]
-                subject = info['subject'].lower()
-                prompt_lower = prompt.lower()
-
-                # 检查完整主体或主体的主要部分是否在prompt中
-                subject_words = subject.split()
-                subject_in_prompt = (
-                    subject in prompt_lower or  # 完整匹配
-                    any(word in prompt_lower for word in subject_words if len(word) > 3)  # 部分匹配（长度>3的词）
-                )
-
-                # 如果相似度很高(>0.8)，即使主体不完全匹配也允许
-                if not subject_in_prompt and best_sim < 0.8:
-                    return None
+                            return None
 
                 return best_edit_id
 

@@ -12,7 +12,7 @@
   "optimizer": "adam",
   "scheduler": "cosine",
   "warmup_steps": 0,
-  "w_edit": 10.0,
+  "w_edit": 3.0,
   "w_suppress": 3.0,
   "w_ortho": 0.3,
   "w_local": 2.0,
