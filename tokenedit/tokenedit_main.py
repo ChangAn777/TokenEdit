@@ -411,104 +411,174 @@ class TokenEditEditor:
         targets: List[str]
     ) -> torch.Tensor:
         """
-        批量计算编辑损失 - 真正的批处理
-        关键: 一次性处理多个样本，充分利用GPU并行能力
+        ???????????????????????? - ??????????????????
+        ??????: ??????????????????????????????????????????GPU????????????
         """
         if len(texts) == 0:
             return torch.tensor(0.0, device=self.device)
 
-        # 批量tokenization - 使用padding实现真正的批处理
+        def split_prompt_and_full(text: str, target: str) -> Tuple[str, str]:
+            if not target:
+                return text, text
+            text_stripped = (text or "").rstrip()
+            target_stripped = target.strip()
+            idx = text_stripped.rfind(target_stripped)
+            if idx != -1 and idx + len(target_stripped) == len(text_stripped):
+                if idx > 0 and text_stripped[idx - 1].isspace():
+                    prompt = text_stripped[:idx].rstrip()
+                    return prompt, text_stripped
+            prompt = text or ""
+            if prompt.endswith(" "):
+                full_text = prompt + target.lstrip()
+            else:
+                full_text = f"{prompt} {target.lstrip()}"
+            return prompt, full_text
+
+        prompt_texts = []
+        full_texts = []
+        target_token_ids = []
+        for text, target in zip(texts, targets):
+            prompt, full_text = split_prompt_and_full(text or "", target or "")
+            prompt_texts.append(prompt)
+            full_texts.append(full_text)
+            target_token_ids.append(self.tokenizer.encode(target or "", add_special_tokens=False))
+
         inputs = self.tokenizer(
-            texts,
+            full_texts,
             return_tensors="pt",
             padding=True,
             truncation=True,
             add_special_tokens=True
         ).to(self.device)
 
-        # 使用混合精度进行批量forward pass
+        prompt_inputs = self.tokenizer(
+            prompt_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            add_special_tokens=True
+        ).to(self.device)
+        prompt_lens = prompt_inputs["attention_mask"].sum(dim=1)
+
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             outputs = self.model(**inputs)
             logits = outputs.logits  # [batch_size, seq_len, vocab_size]
 
-        # 批量计算loss
-        total_loss = 0.0
-        valid_count = 0
+        input_ids = inputs["input_ids"]
+        labels = torch.full_like(input_ids, -100)
+        max_len = input_ids.shape[1]
 
-        for i, (text, target) in enumerate(zip(texts, targets)):
-            # 找到target的起始位置
-            prompt = text.replace(f" {target}", "")
-            prompt_len = len(self.tokenizer(prompt, add_special_tokens=True)['input_ids'])
-            target_tokens = self.tokenizer.encode(target, add_special_tokens=False)
-
-            if len(target_tokens) == 0:
+        for i, target_ids in enumerate(target_token_ids):
+            if len(target_ids) == 0:
                 continue
+            start = int(prompt_lens[i].item())
+            if start >= max_len:
+                continue
+            available = max_len - start
+            target_ids = target_ids[:available]
+            if len(target_ids) == 0:
+                continue
+            labels[i, start:start + len(target_ids)] = torch.tensor(
+                target_ids, device=self.device
+            )
 
-            # 计算该样本的loss
-            sample_loss = 0.0
-            for j, token_id in enumerate(target_tokens):
-                pos = prompt_len + j - 1
-                if pos < logits.shape[1]:
-                    sample_loss += F.cross_entropy(
-                        logits[i, pos].unsqueeze(0),
-                        torch.tensor([token_id], device=self.device)
-                    )
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
 
-            total_loss += sample_loss / len(target_tokens)
-            valid_count += 1
+        token_loss = F.cross_entropy(
+            shift_logits.reshape(-1, shift_logits.size(-1)),
+            shift_labels.reshape(-1),
+            ignore_index=-100,
+            reduction="none"
+        ).view(shift_labels.size())
 
-        if valid_count == 0:
+        valid_mask = shift_labels.ne(-100)
+        valid_counts = valid_mask.sum(dim=1)
+        if (valid_counts > 0).sum().item() == 0:
             return torch.tensor(0.1, device=self.device)
 
-        return total_loss / valid_count
+        per_sample_loss = (token_loss * valid_mask).sum(dim=1) / valid_counts.clamp(min=1)
+        return per_sample_loss[valid_counts > 0].mean()
 
     def _compute_batch_suppress_loss(
         self,
         texts: List[str],
         old_targets: List[str]
     ) -> torch.Tensor:
-        """批量计算抑制损失"""
+        """????????????????????????"""
         if len(texts) == 0:
             return torch.tensor(0.0, device=self.device)
 
-        # 批量tokenization
+        def split_prompt_and_full(text: str, target: str) -> Tuple[str, str]:
+            if not target:
+                return text, text
+            text_stripped = (text or "").rstrip()
+            target_stripped = target.strip()
+            idx = text_stripped.rfind(target_stripped)
+            if idx != -1 and idx + len(target_stripped) == len(text_stripped):
+                if idx > 0 and text_stripped[idx - 1].isspace():
+                    prompt = text_stripped[:idx].rstrip()
+                    return prompt, text_stripped
+            prompt = text or ""
+            if prompt.endswith(" "):
+                full_text = prompt + target.lstrip()
+            else:
+                full_text = f"{prompt} {target.lstrip()}"
+            return prompt, full_text
+
+        prompt_texts = []
+        full_texts = []
+        old_token_ids = []
+        for text, old_target in zip(texts, old_targets):
+            prompt, full_text = split_prompt_and_full(text or "", old_target or "")
+            prompt_texts.append(prompt)
+            full_texts.append(full_text)
+            old_token_ids.append(self.tokenizer.encode(old_target or "", add_special_tokens=False))
+
         inputs = self.tokenizer(
-            texts,
+            full_texts,
             return_tensors="pt",
             padding=True,
             truncation=True,
             add_special_tokens=True
         ).to(self.device)
 
-        # 批量forward
+        prompt_inputs = self.tokenizer(
+            prompt_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            add_special_tokens=True
+        ).to(self.device)
+        prompt_lens = prompt_inputs["attention_mask"].sum(dim=1)
+
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             outputs = self.model(**inputs)
             logits = outputs.logits  # [batch_size, seq_len, vocab_size]
 
+        log_probs = F.log_softmax(logits, dim=-1)
         total_loss = 0.0
         valid_count = 0
+        max_len = logits.shape[1]
 
-        for i, (text, old_target) in enumerate(zip(texts, old_targets)):
-            prompt = text.replace(f" {old_target}", "")
-            prompt_len = len(self.tokenizer(prompt, add_special_tokens=True)['input_ids'])
-            old_tokens = self.tokenizer.encode(old_target, add_special_tokens=False)
-
-            if len(old_tokens) == 0:
+        for i, token_ids in enumerate(old_token_ids):
+            if len(token_ids) == 0:
                 continue
-
-            log_probs = []
-            for j, token_id in enumerate(old_tokens):
-                pos = prompt_len + j - 1
-                if pos < logits.shape[1]:
-                    log_prob = F.log_softmax(logits[i, pos], dim=-1)[token_id]
-                    log_probs.append(log_prob)
-
-            if len(log_probs) > 0:
-                joint_log_prob = sum(log_probs) / len(log_probs)
-                prob_old = torch.exp(joint_log_prob)
-                loss = -torch.log(1.0 - prob_old + 1e-10)
-                total_loss += loss
-                valid_count += 1
+            start = int(prompt_lens[i].item())
+            if start >= max_len:
+                continue
+            seq_log_probs = []
+            for j, token_id in enumerate(token_ids):
+                pos = start + j - 1
+                if 0 <= pos < max_len:
+                    seq_log_probs.append(log_probs[i, pos, token_id])
+            if not seq_log_probs:
+                continue
+            joint_log_prob = sum(seq_log_probs) / len(seq_log_probs)
+            prob_old = torch.exp(joint_log_prob)
+            loss = -torch.log(1.0 - prob_old + 1e-10)
+            total_loss += loss
+            valid_count += 1
 
         if valid_count == 0:
             return torch.tensor(0.0, device=self.device)
