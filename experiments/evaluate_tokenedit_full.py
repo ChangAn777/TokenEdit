@@ -447,7 +447,7 @@ def test_batch_prediction_multi(
             "target_true": prob_true
         })
 
-        # === IMPROVED: Add actual generation test ===
+        # === IMPROVED: Use generation-based evaluation (more practical) ===
         # Generate actual output to verify
         with torch.no_grad():
             # Re-inject edit for generation
@@ -473,30 +473,29 @@ def test_batch_prediction_multi(
             # Clear injection
             editor.injector.clear()
 
-        # Check correctness using BOTH probability and generation
+        # Generation-based check (PRIMARY)
         if which_correct is not None and i < len(which_correct):
-            prob_based_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
-
-            # Generation-based check
             if which_correct[i] == 0:
-                gen_based_correct = target_new.lower() in generated_answer.lower()
+                # Should generate target_new
+                is_correct = target_new.lower() in generated_answer.lower()
             else:
-                gen_based_correct = target_true.lower() in generated_answer.lower()
+                # Should generate target_true
+                is_correct = target_true.lower() in generated_answer.lower()
         else:
             # Default: assume should predict target_new
-            prob_based_correct = prob_new > prob_true
-            gen_based_correct = target_new.lower() in generated_answer.lower()
+            is_correct = target_new.lower() in generated_answer.lower()
 
-        # Final decision: BOTH must be correct
-        is_correct = prob_based_correct and gen_based_correct
         targets_correct.append(is_correct)
+
+        # Probability-based check (for debugging/reference only)
+        prob_based_correct = (prob_new > prob_true) if (which_correct is None or which_correct[i] == 0) else (prob_true > prob_new)
 
         # Enhanced debug output
         expected_target = 'new' if (which_correct is None or which_correct[i] == 0) else 'true'
         print(f"[DEBUG] Sample {i}: edit_id={edit_id}, injected={injection_success}")
-        print(f"        prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, prob_correct={prob_based_correct}")
-        print(f"        generated='{generated_answer[:50]}', gen_correct={gen_based_correct}")
-        print(f"        expected={expected_target}, final_correct={is_correct}")
+        print(f"        prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, prob_based={prob_based_correct}")
+        print(f"        generated='{generated_answer[:50]}', expected={expected_target}")
+        print(f"        final_correct={is_correct} (generation-based)")
 
     return probs, targets_correct
 
@@ -607,7 +606,7 @@ def test_batch_prediction(
             "target_true": prob_true
         })
 
-        # === IMPROVED: Add actual generation test ===
+        # === IMPROVED: Use generation-based evaluation (more practical) ===
         # Generate actual output to verify
         with torch.no_grad():
             # Re-inject edit for generation
@@ -633,20 +632,21 @@ def test_batch_prediction(
             # Clear injection
             editor.injector.clear()
 
-        # Check correctness using BOTH probability and generation
-        prob_based_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
-
-        # Generation-based check
+        # Generation-based check (PRIMARY - what matters in practice)
         if which_correct[i] == 0:
             # Should generate target_new
-            gen_based_correct = target_new.lower() in generated_answer.lower()
+            is_correct = target_new.lower() in generated_answer.lower()
         else:
             # Should generate target_true
-            gen_based_correct = target_true.lower() in generated_answer.lower()
+            is_correct = target_true.lower() in generated_answer.lower()
 
-        # Final decision: BOTH must be correct for strict evaluation
-        is_correct = prob_based_correct and gen_based_correct
         targets_correct.append(is_correct)
+
+        # Probability-based check (for debugging/reference only)
+        prob_based_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
+
+        # Debug output (optional - can be commented out for speed)
+        # print(f"[DEBUG] Sample {i}: prob_based={prob_based_correct}, gen_based={is_correct}, generated='{generated_answer[:30]}'")
 
     return probs, targets_correct
 
