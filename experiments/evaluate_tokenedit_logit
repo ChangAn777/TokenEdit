@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-TokenEdit evaluation script - FIXED VERSION
-Uses LOGITS/PROBABILITIES instead of generation for accurate evaluation
+TokenEdit evaluation script - ARGMAX VERSION (Most Reliable)
+Uses ARGMAX to check if predicted token exactly matches target
 """
 import sys
 import os
@@ -125,14 +125,16 @@ def load_data(num_samples=100, data_dir: str = "data"):
     return requests
 
 
-def compute_rewrite_quality_logits(
+def compute_rewrite_quality_argmax(
     editor: TokenEditEditor,
     record: Dict,
 ) -> Dict:
     """
-    Compute rewrite quality using LOGITS (not generation)
+    Compute rewrite quality using ARGMAX (most reliable method)
     
-    CRITICAL FIX: Uses probability comparison instead of text generation
+    For each prompt:
+    1. Get logits with edit injection
+    2. Check if argmax(logits) == target_first_token
     
     Args:
         editor: TokenEdit editor instance
@@ -168,8 +170,8 @@ def compute_rewrite_quality_logits(
     all_prompts = [p for prompts in test_prompts for p in prompts]
     all_correct = [c for corrects in which_correct for c in corrects]
 
-    # CRITICAL: Use logits-based evaluation
-    probs, targets_correct = test_batch_prediction_logits(
+    # CRITICAL: Use argmax-based evaluation
+    probs, targets_correct, pred_tokens = test_batch_prediction_argmax(
         editor,
         all_prompts,
         all_correct,
@@ -181,6 +183,7 @@ def compute_rewrite_quality_logits(
     cutoffs = [0] + np.cumsum(list(map(len, test_prompts))).tolist()
     ret_probs = [probs[cutoffs[i]:cutoffs[i+1]] for i in range(len(test_prompts))]
     ret_corrects = [targets_correct[cutoffs[i]:cutoffs[i+1]] for i in range(len(test_prompts))]
+    ret_pred_tokens = [pred_tokens[cutoffs[i]:cutoffs[i+1]] for i in range(len(test_prompts))]
 
     # Structure results
     ret = {
@@ -190,6 +193,9 @@ def compute_rewrite_quality_logits(
         "rewrite_prompts_correct": ret_corrects[0],
         "paraphrase_prompts_correct": ret_corrects[1],
         "neighborhood_prompts_correct": ret_corrects[2],
+        "rewrite_prompts_pred": ret_pred_tokens[0],
+        "paraphrase_prompts_pred": ret_pred_tokens[1],
+        "neighborhood_prompts_pred": ret_pred_tokens[2],
     }
 
     # Compute summary metrics
@@ -200,7 +206,7 @@ def compute_rewrite_quality_logits(
     return ret
 
 
-def test_batch_prediction_logits(
+def test_batch_prediction_argmax(
     editor: TokenEditEditor,
     prefixes: List[str],
     which_correct: List[int],
@@ -208,14 +214,12 @@ def test_batch_prediction_logits(
     target_true: str,
 ) -> tuple:
     """
-    Test batch prediction using LOGITS/PROBABILITIES
-    
-    CRITICAL FIX: No generation, pure probability comparison
+    Test batch prediction using ARGMAX (most reliable)
     
     Method:
-    1. For each prompt, get P(target_new | prompt) and P(target_true | prompt)
-    2. WITH proper edit injection
-    3. Compare probabilities to determine correctness
+    1. For each prompt, inject edit and get logits
+    2. predicted_token = argmax(logits)
+    3. Check if predicted_token matches target_first_token
     
     Args:
         editor: TokenEdit editor
@@ -225,14 +229,19 @@ def test_batch_prediction_logits(
         target_true: True target string
 
     Returns:
-        (probs, targets_correct) tuple
+        (probs, targets_correct, pred_tokens) tuple
     """
     probs = []
     targets_correct = []
+    pred_tokens = []
     
-    # Tokenize targets once
+    # Tokenize targets to get first token
     target_new_tokens = editor.tokenizer.encode(target_new, add_special_tokens=False)
     target_true_tokens = editor.tokenizer.encode(target_true, add_special_tokens=False)
+    
+    # Get first token ID (most important for evaluation)
+    target_new_first = target_new_tokens[0] if len(target_new_tokens) > 0 else -1
+    target_true_first = target_true_tokens[0] if len(target_true_tokens) > 0 else -1
 
     for i, prefix in enumerate(prefixes):
         # Step 1: Route to find which edit to apply
@@ -256,123 +265,62 @@ def test_batch_prediction_logits(
                     add_special_tokens=True
                 )
         
-        # Step 3: Compute P(target_new | prompt) WITH injection
-        prob_new = compute_target_probability_with_injection(
-            editor, prefix, target_new, target_new_tokens,
-            edit_id, subject_positions
-        )
+        # Step 3: Inject edit
+        if edit_id is not None and subject_positions:
+            editor.injector.inject(
+                editor.model,
+                edit_id,
+                editor.edit_module,
+                subject_positions
+            )
         
-        # Step 4: Compute P(target_true | prompt) WITH injection
-        prob_true = compute_target_probability_with_injection(
-            editor, prefix, target_true, target_true_tokens,
-            edit_id, subject_positions
-        )
-        
-        # Step 5: Record probabilities
-        probs.append({
-            "target_new": prob_new,
-            "target_true": prob_true
-        })
-        
-        # Step 6: Determine correctness by comparing probabilities
-        if which_correct[i] == 0:
-            # Should predict target_new
-            is_correct = prob_new > prob_true
-        else:
-            # Should predict target_true (for neighborhood prompts)
-            is_correct = prob_true > prob_new
-        
-        targets_correct.append(is_correct)
+        try:
+            # Step 4: Forward pass to get logits
+            inputs = editor.tokenizer(prefix, return_tensors="pt", add_special_tokens=True).to(editor.device)
+            
+            with torch.no_grad():
+                outputs = editor.model(**inputs)
+                logits = outputs.logits[0, -1, :]  # Last token logits (next token prediction)
+            
+            # Step 5: Get predicted token using ARGMAX
+            predicted_token_id = torch.argmax(logits).item()
+            predicted_token_str = editor.tokenizer.decode([predicted_token_id])
+            
+            # Step 6: Get probabilities for both targets
+            probs_tensor = F.softmax(logits, dim=-1)
+            prob_new = probs_tensor[target_new_first].item() if target_new_first >= 0 else 0.0
+            prob_true = probs_tensor[target_true_first].item() if target_true_first >= 0 else 0.0
+            
+            probs.append({
+                "target_new": prob_new,
+                "target_true": prob_true,
+                "predicted_token": predicted_token_str,
+                "predicted_token_id": predicted_token_id
+            })
+            
+            # Step 7: Determine correctness by comparing argmax with expected target
+            if which_correct[i] == 0:
+                # Should predict target_new
+                is_correct = (predicted_token_id == target_new_first)
+                expected = target_new
+            else:
+                # Should predict target_true (for neighborhood prompts)
+                is_correct = (predicted_token_id == target_true_first)
+                expected = target_true
+            
+            targets_correct.append(is_correct)
+            pred_tokens.append({
+                "predicted": predicted_token_str,
+                "expected": expected,
+                "match": is_correct
+            })
+            
+        finally:
+            # Step 8: Clear injection
+            if edit_id is not None:
+                editor.injector.clear()
 
-    return probs, targets_correct
-
-
-def compute_target_probability_with_injection(
-    editor: TokenEditEditor,
-    prefix: str,
-    target: str,
-    target_tokens: List[int],
-    edit_id: int = None,
-    subject_positions: List[int] = None
-) -> float:
-    """
-    Compute P(target | prefix) with proper edit injection
-    
-    Returns average log probability (in log space for numerical stability)
-    
-    Args:
-        editor: TokenEdit editor
-        prefix: Input prompt
-        target: Target string
-        target_tokens: Pre-tokenized target token IDs
-        edit_id: Edit ID to inject (None = no injection)
-        subject_positions: Subject positions for injection
-
-    Returns:
-        Average log probability
-    """
-    # Construct full input
-    full_text = f"{prefix} {target}"
-    inputs = editor.tokenizer(full_text, return_tensors="pt", add_special_tokens=True).to(editor.device)
-    
-    # Get prefix length
-    prefix_len = len(editor.tokenizer.encode(prefix, add_special_tokens=True))
-    
-    # Inject edit if applicable
-    if edit_id is not None and subject_positions:
-        editor.injector.inject(
-            editor.model,
-            edit_id,
-            editor.edit_module,
-            subject_positions
-        )
-    
-    try:
-        # Forward pass
-        with torch.no_grad():
-            outputs = editor.model(**inputs)
-            logits = outputs.logits[0]  # (seq_len, vocab_size)
-        
-        # Compute log probability for each target token
-        log_probs = []
-        for j, token_id in enumerate(target_tokens):
-            pos = prefix_len + j - 1  # Position in logits
-            if pos < logits.shape[0]:
-                log_prob = F.log_softmax(logits[pos], dim=-1)[token_id].item()
-                log_probs.append(log_prob)
-        
-        # Return average log probability
-        return np.mean(log_probs) if len(log_probs) > 0 else -100.0
-        
-    finally:
-        # Always clear injection
-        if edit_id is not None:
-            editor.injector.clear()
-
-
-def compute_batch_rewrite_quality(
-    editor: TokenEditEditor,
-    records: List[Dict],
-) -> List[Dict]:
-    """
-    Compute rewrite quality for a batch of records
-    
-    Uses logits-based evaluation for accuracy
-
-    Args:
-        editor: TokenEdit editor instance
-        records: List of edit request records
-
-    Returns:
-        List of metric dictionaries
-    """
-    metrics_list = []
-    
-    for record in records:
-        metrics = compute_rewrite_quality_logits(editor, record)
-        metrics_list.append(metrics)
-    
-    return metrics_list
+    return probs, targets_correct, pred_tokens
 
 
 def evaluate_model(
@@ -389,7 +337,7 @@ def evaluate_model(
         num_epochs: Override num_epochs from config
     """
     print("=" * 70)
-    print(f"TokenEdit Evaluation - {model_name}")
+    print(f"TokenEdit Evaluation - ARGMAX Method (Most Reliable)")
     print("=" * 70)
 
     # [1/4] Load model
@@ -443,7 +391,7 @@ def evaluate_model(
         raise
 
     # Evaluate
-    print(f"\n[Evaluating] Computing rewrite quality metrics (logits-based)...")
+    print(f"\n[Evaluating] Computing rewrite quality metrics (argmax-based)...")
     
     results = []
     efficacy_list = []
@@ -452,7 +400,7 @@ def evaluate_model(
 
     # Process each sample
     for i, req in enumerate(tqdm(requests, desc="Evaluating")):
-        metrics = compute_rewrite_quality_logits(editor, req)
+        metrics = compute_rewrite_quality_argmax(editor, req)
         
         result = {
             "case_id": req['case_id'],
@@ -471,11 +419,14 @@ def evaluate_model(
         specificity_list.append(metrics["specificity"])
         
         # Debug output for first few samples
-        if i < 3:
+        if i < 5:
             print(f"\nSample {i}:")
             print(f"  Prompt: {req['prompt'].format(req['subject'])}")
             print(f"  Target new: {req['target_new']}, Target true: {req['target_true']}")
             print(f"  Efficacy: {metrics['efficacy']:.2%}")
+            if len(metrics['rewrite_prompts_pred']) > 0:
+                pred_info = metrics['rewrite_prompts_pred'][0]
+                print(f"  Predicted: '{pred_info['predicted']}', Expected: '{pred_info['expected']}', Match: {pred_info['match']}")
             print(f"  Generalization: {metrics['generalization']:.2%}")
             print(f"  Specificity: {metrics['specificity']:.2%}")
 
@@ -495,7 +446,7 @@ def evaluate_model(
 
     # Print summary
     print("\n" + "=" * 70)
-    print("Evaluation Summary")
+    print("Evaluation Summary (ARGMAX Method)")
     print("=" * 70)
     print(f"Efficacy:       {summary['efficacy_mean']:.2%} ± {summary['efficacy_std']:.2%}")
     print(f"Generalization: {summary['generalization_mean']:.2%} ± {summary['generalization_std']:.2%}")
@@ -504,7 +455,7 @@ def evaluate_model(
 
     # Save results
     Path("results").mkdir(exist_ok=True)
-    results_file = f"results/tokenedit_{model_name.replace('/', '_')}_logits.json"
+    results_file = f"results/tokenedit_{model_name.replace('/', '_')}_argmax.json"
     with open(results_file, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False, default=_json_default)
 
@@ -516,7 +467,7 @@ def evaluate_model(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Evaluate TokenEdit (Logits-based)")
+    parser = argparse.ArgumentParser(description="Evaluate TokenEdit (ARGMAX Method)")
     parser.add_argument('--model', type=str, default='gpt2-xl',
                        choices=['gpt2-xl', 'gpt-j-6b', 'llama3-8b'],
                        help='Model name')
