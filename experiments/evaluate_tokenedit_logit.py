@@ -153,10 +153,19 @@ def compute_rewrite_quality_argmax(
     neighborhood_prompts = record.get('neighborhood_prompts', [])[:5]
 
     # Organize test prompts
+    # Handle both string and dict formats for neighborhood_prompts
+    neighborhood_prompts_list = []
+    if neighborhood_prompts:
+        for nb in neighborhood_prompts:
+            if isinstance(nb, dict):
+                neighborhood_prompts_list.append(nb['prompt'])
+            elif isinstance(nb, str):
+                neighborhood_prompts_list.append(nb)
+
     test_prompts = [
         [rewrite_prompt],
         paraphrase_prompts,
-        [nb['prompt'] for nb in neighborhood_prompts] if neighborhood_prompts else []
+        neighborhood_prompts_list
     ]
 
     # 0 = should predict target_new, 1 = should predict target_true
