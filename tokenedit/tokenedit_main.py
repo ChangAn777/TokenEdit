@@ -263,10 +263,16 @@ class TokenEditEditor:
                     })
         
         print(f"  预处理完成: {len(all_samples)} 个有效样本")
-        
-        # 优化3: 大批量训练
-        effective_batch_size = 32
-        
+
+        # 优化3: 动态调整批量大小以充分利用80GB显存
+        # A800 80GB可以处理更大的batch size
+        effective_batch_size = min(64, max(32, len(all_samples) // 10))
+
+        if self.hparams.verbose:
+            print(f"  使用批量大小: {effective_batch_size}")
+            expected_iterations = (len(all_samples) + effective_batch_size - 1) // effective_batch_size
+            print(f"  预计每个epoch迭代次数: {expected_iterations}")
+
         # 训练循环
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
@@ -398,6 +404,155 @@ class TokenEditEditor:
             return total_loss / len(batch_samples)
         
         return total_loss
+
+    def _compute_batch_edit_loss(
+        self,
+        texts: List[str],
+        targets: List[str]
+    ) -> torch.Tensor:
+        """
+        批量计算编辑损失 - 真正的批处理
+        关键: 一次性处理多个样本，充分利用GPU并行能力
+        """
+        if len(texts) == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        # 批量tokenization - 使用padding实现真正的批处理
+        inputs = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            add_special_tokens=True
+        ).to(self.device)
+
+        # 使用混合精度进行批量forward pass
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
+            outputs = self.model(**inputs)
+            logits = outputs.logits  # [batch_size, seq_len, vocab_size]
+
+        # 批量计算loss
+        total_loss = 0.0
+        valid_count = 0
+
+        for i, (text, target) in enumerate(zip(texts, targets)):
+            # 找到target的起始位置
+            prompt = text.replace(f" {target}", "")
+            prompt_len = len(self.tokenizer(prompt, add_special_tokens=True)['input_ids'])
+            target_tokens = self.tokenizer.encode(target, add_special_tokens=False)
+
+            if len(target_tokens) == 0:
+                continue
+
+            # 计算该样本的loss
+            sample_loss = 0.0
+            for j, token_id in enumerate(target_tokens):
+                pos = prompt_len + j - 1
+                if pos < logits.shape[1]:
+                    sample_loss += F.cross_entropy(
+                        logits[i, pos].unsqueeze(0),
+                        torch.tensor([token_id], device=self.device)
+                    )
+
+            total_loss += sample_loss / len(target_tokens)
+            valid_count += 1
+
+        if valid_count == 0:
+            return torch.tensor(0.1, device=self.device)
+
+        return total_loss / valid_count
+
+    def _compute_batch_suppress_loss(
+        self,
+        texts: List[str],
+        old_targets: List[str]
+    ) -> torch.Tensor:
+        """批量计算抑制损失"""
+        if len(texts) == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        # 批量tokenization
+        inputs = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            add_special_tokens=True
+        ).to(self.device)
+
+        # 批量forward
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
+            outputs = self.model(**inputs)
+            logits = outputs.logits  # [batch_size, seq_len, vocab_size]
+
+        total_loss = 0.0
+        valid_count = 0
+
+        for i, (text, old_target) in enumerate(zip(texts, old_targets)):
+            prompt = text.replace(f" {old_target}", "")
+            prompt_len = len(self.tokenizer(prompt, add_special_tokens=True)['input_ids'])
+            old_tokens = self.tokenizer.encode(old_target, add_special_tokens=False)
+
+            if len(old_tokens) == 0:
+                continue
+
+            log_probs = []
+            for j, token_id in enumerate(old_tokens):
+                pos = prompt_len + j - 1
+                if pos < logits.shape[1]:
+                    log_prob = F.log_softmax(logits[i, pos], dim=-1)[token_id]
+                    log_probs.append(log_prob)
+
+            if len(log_probs) > 0:
+                joint_log_prob = sum(log_probs) / len(log_probs)
+                prob_old = torch.exp(joint_log_prob)
+                loss = -torch.log(1.0 - prob_old + 1e-10)
+                total_loss += loss
+                valid_count += 1
+
+        if valid_count == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        return total_loss / valid_count
+
+    def _compute_batch_local_loss(self, prompts: List[str]) -> torch.Tensor:
+        """批量计算局部性损失"""
+        if len(prompts) == 0:
+            return torch.tensor(0.0, device=self.device)
+
+        # 批量tokenization
+        inputs = self.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            add_special_tokens=True
+        ).to(self.device)
+
+        # 计算原始logits (without edit)
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                orig_outputs = self.model(**inputs)
+                orig_logits = orig_outputs.logits
+
+        # 计算编辑后的logits (with edit) - 注意这里已经inject了
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
+            edit_outputs = self.model(**inputs)
+            edit_logits = edit_outputs.logits
+
+        # 批量计算KL散度
+        orig_probs = F.softmax(orig_logits, dim=-1)
+        edit_log_probs = F.log_softmax(edit_logits, dim=-1)
+
+        # KL(P_orig || P_edit) = sum(P_orig * log(P_orig / P_edit))
+        kl_div = F.kl_div(
+            edit_log_probs,
+            orig_probs,
+            reduction='batchmean',
+            log_target=False
+        )
+
+        return kl_div
 
     def _compute_edit_loss_fast(
         self,
