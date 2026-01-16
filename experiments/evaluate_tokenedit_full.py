@@ -447,55 +447,19 @@ def test_batch_prediction_multi(
             "target_true": prob_true
         })
 
-        # === IMPROVED: Use generation-based evaluation (more practical) ===
-        # Generate actual output to verify
-        with torch.no_grad():
-            # Re-inject edit for generation
-            if edit_id is not None and injection_success:
-                editor.injector.inject(
-                    editor.model,
-                    edit_id,
-                    editor.edit_module,
-                    subject_positions
-                )
-
-            # Generate text
-            gen_inputs = editor.tokenizer(prefix, return_tensors="pt").to(editor.device)
-            gen_outputs = editor.model.generate(
-                **gen_inputs,
-                max_new_tokens=10,
-                do_sample=False,
-                pad_token_id=editor.tokenizer.eos_token_id
-            )
-            generated_text = editor.tokenizer.decode(gen_outputs[0], skip_special_tokens=True)
-            generated_answer = generated_text[len(prefix):].strip()
-
-            # Clear injection
-            editor.injector.clear()
-
-        # Generation-based check (PRIMARY)
+        # Check if correct based on which_correct parameter
         if which_correct is not None and i < len(which_correct):
-            if which_correct[i] == 0:
-                # Should generate target_new
-                is_correct = target_new.lower() in generated_answer.lower()
-            else:
-                # Should generate target_true
-                is_correct = target_true.lower() in generated_answer.lower()
+            # 0 = should predict target_new, 1 = should predict target_true
+            is_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
         else:
             # Default: assume should predict target_new
-            is_correct = target_new.lower() in generated_answer.lower()
-
+            is_correct = prob_new > prob_true
         targets_correct.append(is_correct)
 
-        # Probability-based check (for debugging/reference only)
-        prob_based_correct = (prob_new > prob_true) if (which_correct is None or which_correct[i] == 0) else (prob_true > prob_new)
-
-        # Enhanced debug output
-        expected_target = 'new' if (which_correct is None or which_correct[i] == 0) else 'true'
-        print(f"[DEBUG] Sample {i}: edit_id={edit_id}, injected={injection_success}")
-        print(f"        prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, prob_based={prob_based_correct}")
-        print(f"        generated='{generated_answer[:50]}', expected={expected_target}")
-        print(f"        final_correct={is_correct} (generation-based)")
+        # Debug output for all samples (removed limit)
+        print(f"[DEBUG] Sample {i}: edit_id={edit_id}, injected={injection_success}, "
+              f"prob_new={prob_new:.4f}, prob_true={prob_true:.4f}, "
+              f"expected={'new' if (which_correct is None or which_correct[i] == 0) else 'true'}, correct={is_correct}")
 
     return probs, targets_correct
 
@@ -606,47 +570,9 @@ def test_batch_prediction(
             "target_true": prob_true
         })
 
-        # === IMPROVED: Use generation-based evaluation (more practical) ===
-        # Generate actual output to verify
-        with torch.no_grad():
-            # Re-inject edit for generation
-            if edit_id is not None and injection_success:
-                editor.injector.inject(
-                    editor.model,
-                    edit_id,
-                    editor.edit_module,
-                    subject_positions
-                )
-
-            # Generate text
-            gen_inputs = editor.tokenizer(prefix, return_tensors="pt").to(editor.device)
-            gen_outputs = editor.model.generate(
-                **gen_inputs,
-                max_new_tokens=10,
-                do_sample=False,
-                pad_token_id=editor.tokenizer.eos_token_id
-            )
-            generated_text = editor.tokenizer.decode(gen_outputs[0], skip_special_tokens=True)
-            generated_answer = generated_text[len(prefix):].strip()
-
-            # Clear injection
-            editor.injector.clear()
-
-        # Generation-based check (PRIMARY - what matters in practice)
-        if which_correct[i] == 0:
-            # Should generate target_new
-            is_correct = target_new.lower() in generated_answer.lower()
-        else:
-            # Should generate target_true
-            is_correct = target_true.lower() in generated_answer.lower()
-
+        # Check if correct prediction
+        is_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
         targets_correct.append(is_correct)
-
-        # Probability-based check (for debugging/reference only)
-        prob_based_correct = (prob_new > prob_true) if which_correct[i] == 0 else (prob_true > prob_new)
-
-        # Debug output (optional - can be commented out for speed)
-        # print(f"[DEBUG] Sample {i}: prob_based={prob_based_correct}, gen_based={is_correct}, generated='{generated_answer[:30]}'")
 
     return probs, targets_correct
 

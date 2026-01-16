@@ -1,0 +1,534 @@
+# -*- coding: utf-8 -*-
+"""
+TokenEdit evaluation script - FIXED VERSION
+Uses LOGITS/PROBABILITIES instead of generation for accurate evaluation
+"""
+import sys
+import os
+
+# Add project root to Python path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+sys.path.insert(0, project_root)
+
+import json
+import time
+from pathlib import Path
+from typing import Dict, List, Any
+import numpy as np
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    from model_config import load_model_optimized
+    from tokenedit import TokenEditEditor, TokenEditHyperParams
+except ImportError as e:
+    print(f"Error: Cannot import required modules")
+    print(f"Python path: {sys.path}")
+    print(f"Project root: {project_root}")
+    sys.exit(1)
+
+
+def _json_default(o: Any):
+    """Convert numpy types to Python native types for JSON serialization."""
+    if isinstance(o, np.bool_):
+        return bool(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    return o
+
+
+def load_hparams_from_json(model_name: str, hparams_dir: str = "hparams/TokenEdit"):
+    """Load hyperparameters from JSON file"""
+    hparams_path = Path(hparams_dir) / f"{model_name}.json"
+
+    if not hparams_path.exists():
+        print(f"Warning: Config file not found {hparams_path}, using default values")
+        return TokenEditHyperParams(model_name=model_name)
+
+    print(f"Loading config from {hparams_path}")
+    with open(hparams_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+
+    print(f"  Config parameters:")
+    print(f"    - target_layers: {config.get('target_layers', 'not set')}")
+    print(f"    - num_epochs: {config.get('num_epochs', 100)}")
+    print(f"    - learning_rate: {config.get('learning_rate', 0.001)}")
+    print(f"    - w_edit: {config.get('w_edit', 1.0)}")
+    print(f"    - w_suppress: {config.get('w_suppress', 0.5)}")
+
+    return TokenEditHyperParams(**config)
+
+
+def load_data(num_samples=100, data_dir: str = "data"):
+    """
+    Load CounterFact dataset
+
+    Args:
+        num_samples: Number of samples to load
+        data_dir: Data directory path
+
+    Returns:
+        List of edit requests
+    """
+    # Try to load CounterFact dataset
+    data_path = Path(data_dir) / "counterfact.json"
+    sample_path = Path(data_dir) / "sample_data.json"
+
+    # Auto-download if not exists
+    if not data_path.exists():
+        print(f"CounterFact dataset not found at {data_path}")
+        print("Attempting to download...")
+        try:
+            import requests
+            data_dir = Path(data_dir)
+            data_dir.mkdir(exist_ok=True, parents=True)
+            url = "https://rome.baulab.info/data/dsets/counterfact.json"
+            print(f"Downloading from {url}...")
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            with open(data_path, 'w', encoding='utf-8') as f:
+                json.dump(response.json(), f, indent=2)
+            print(f"Downloaded CounterFact dataset: {len(response.json())} samples")
+        except Exception as e:
+            print(f"Failed to download: {e}")
+            print(f"Using sample data from {sample_path}")
+            data_path = sample_path
+
+    # Load data
+    with open(data_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    print(f"Loaded {len(data)} samples from {data_path.name}")
+
+    # Convert to request format
+    requests = []
+    for item in data[:num_samples]:
+        req = item['requested_rewrite']
+        requests.append({
+            'case_id': item.get('case_id', len(requests)),
+            'prompt': req['prompt'],
+            'subject': req['subject'],
+            'relation_id': req.get('relation_id', 'P36'),
+            'target_new': req['target_new']['str'],
+            'target_new_id': req['target_new']['id'],
+            'target_true': req['target_true']['str'],
+            'target_true_id': req['target_true']['id'],
+            'paraphrase_prompts': item.get('paraphrase_prompts', []),
+            'neighborhood_prompts': item.get('neighborhood_prompts', []),
+            'generation_prompts': item.get('generation_prompts', []),
+        })
+    return requests
+
+
+def compute_rewrite_quality_logits(
+    editor: TokenEditEditor,
+    record: Dict,
+) -> Dict:
+    """
+    Compute rewrite quality using LOGITS (not generation)
+    
+    CRITICAL FIX: Uses probability comparison instead of text generation
+    
+    Args:
+        editor: TokenEdit editor instance
+        record: Single edit request record
+
+    Returns:
+        Dictionary containing evaluation metrics
+    """
+    subject = record['subject']
+    target_new = record['target_new']
+    target_true = record['target_true']
+
+    # Test prompts
+    rewrite_prompt = record['prompt'].format(subject)
+    paraphrase_prompts = record.get('paraphrase_prompts', [])[:5]
+    neighborhood_prompts = record.get('neighborhood_prompts', [])[:5]
+
+    # Organize test prompts
+    test_prompts = [
+        [rewrite_prompt],
+        paraphrase_prompts,
+        [nb['prompt'] for nb in neighborhood_prompts] if neighborhood_prompts else []
+    ]
+
+    # 0 = should predict target_new, 1 = should predict target_true
+    which_correct = [
+        [0],  # rewrite_prompts
+        [0] * len(test_prompts[1]),  # paraphrase_prompts
+        [1] * len(test_prompts[2]),  # neighborhood_prompts
+    ]
+
+    # Flatten
+    all_prompts = [p for prompts in test_prompts for p in prompts]
+    all_correct = [c for corrects in which_correct for c in corrects]
+
+    # CRITICAL: Use logits-based evaluation
+    probs, targets_correct = test_batch_prediction_logits(
+        editor,
+        all_prompts,
+        all_correct,
+        target_new,
+        target_true
+    )
+
+    # Unflatten results
+    cutoffs = [0] + np.cumsum(list(map(len, test_prompts))).tolist()
+    ret_probs = [probs[cutoffs[i]:cutoffs[i+1]] for i in range(len(test_prompts))]
+    ret_corrects = [targets_correct[cutoffs[i]:cutoffs[i+1]] for i in range(len(test_prompts))]
+
+    # Structure results
+    ret = {
+        "rewrite_prompts_probs": ret_probs[0],
+        "paraphrase_prompts_probs": ret_probs[1],
+        "neighborhood_prompts_probs": ret_probs[2],
+        "rewrite_prompts_correct": ret_corrects[0],
+        "paraphrase_prompts_correct": ret_corrects[1],
+        "neighborhood_prompts_correct": ret_corrects[2],
+    }
+
+    # Compute summary metrics
+    ret["efficacy"] = np.mean(ret_corrects[0]) if len(ret_corrects[0]) > 0 else 0.0
+    ret["generalization"] = np.mean(ret_corrects[1]) if len(ret_corrects[1]) > 0 else 0.0
+    ret["specificity"] = np.mean(ret_corrects[2]) if len(ret_corrects[2]) > 0 else 0.0
+
+    return ret
+
+
+def test_batch_prediction_logits(
+    editor: TokenEditEditor,
+    prefixes: List[str],
+    which_correct: List[int],
+    target_new: str,
+    target_true: str,
+) -> tuple:
+    """
+    Test batch prediction using LOGITS/PROBABILITIES
+    
+    CRITICAL FIX: No generation, pure probability comparison
+    
+    Method:
+    1. For each prompt, get P(target_new | prompt) and P(target_true | prompt)
+    2. WITH proper edit injection
+    3. Compare probabilities to determine correctness
+    
+    Args:
+        editor: TokenEdit editor
+        prefixes: List of test prompts
+        which_correct: 0 for target_new, 1 for target_true
+        target_new: New target string
+        target_true: True target string
+
+    Returns:
+        (probs, targets_correct) tuple
+    """
+    probs = []
+    targets_correct = []
+    
+    # Tokenize targets once
+    target_new_tokens = editor.tokenizer.encode(target_new, add_special_tokens=False)
+    target_true_tokens = editor.tokenizer.encode(target_true, add_special_tokens=False)
+
+    for i, prefix in enumerate(prefixes):
+        # Step 1: Route to find which edit to apply
+        inputs = editor.tokenizer(prefix, return_tensors="pt", add_special_tokens=True).to(editor.device)
+        
+        with torch.no_grad():
+            outputs = editor.model(**inputs, output_hidden_states=True)
+            prompt_emb = outputs.hidden_states[-1].mean(dim=1)
+        
+        edit_id = editor.router.route(prefix, prompt_emb)
+        
+        # Step 2: Find subject positions and prepare injection
+        subject_positions = None
+        if edit_id is not None:
+            req = editor.edits_registry.get(edit_id)
+            if req:
+                subject_positions = editor.utils.find_subject_positions(
+                    prefix,
+                    req['subject'],
+                    verbose=False,
+                    add_special_tokens=True
+                )
+        
+        # Step 3: Compute P(target_new | prompt) WITH injection
+        prob_new = compute_target_probability_with_injection(
+            editor, prefix, target_new, target_new_tokens,
+            edit_id, subject_positions
+        )
+        
+        # Step 4: Compute P(target_true | prompt) WITH injection
+        prob_true = compute_target_probability_with_injection(
+            editor, prefix, target_true, target_true_tokens,
+            edit_id, subject_positions
+        )
+        
+        # Step 5: Record probabilities
+        probs.append({
+            "target_new": prob_new,
+            "target_true": prob_true
+        })
+        
+        # Step 6: Determine correctness by comparing probabilities
+        if which_correct[i] == 0:
+            # Should predict target_new
+            is_correct = prob_new > prob_true
+        else:
+            # Should predict target_true (for neighborhood prompts)
+            is_correct = prob_true > prob_new
+        
+        targets_correct.append(is_correct)
+
+    return probs, targets_correct
+
+
+def compute_target_probability_with_injection(
+    editor: TokenEditEditor,
+    prefix: str,
+    target: str,
+    target_tokens: List[int],
+    edit_id: int = None,
+    subject_positions: List[int] = None
+) -> float:
+    """
+    Compute P(target | prefix) with proper edit injection
+    
+    Returns average log probability (in log space for numerical stability)
+    
+    Args:
+        editor: TokenEdit editor
+        prefix: Input prompt
+        target: Target string
+        target_tokens: Pre-tokenized target token IDs
+        edit_id: Edit ID to inject (None = no injection)
+        subject_positions: Subject positions for injection
+
+    Returns:
+        Average log probability
+    """
+    # Construct full input
+    full_text = f"{prefix} {target}"
+    inputs = editor.tokenizer(full_text, return_tensors="pt", add_special_tokens=True).to(editor.device)
+    
+    # Get prefix length
+    prefix_len = len(editor.tokenizer.encode(prefix, add_special_tokens=True))
+    
+    # Inject edit if applicable
+    if edit_id is not None and subject_positions:
+        editor.injector.inject(
+            editor.model,
+            edit_id,
+            editor.edit_module,
+            subject_positions
+        )
+    
+    try:
+        # Forward pass
+        with torch.no_grad():
+            outputs = editor.model(**inputs)
+            logits = outputs.logits[0]  # (seq_len, vocab_size)
+        
+        # Compute log probability for each target token
+        log_probs = []
+        for j, token_id in enumerate(target_tokens):
+            pos = prefix_len + j - 1  # Position in logits
+            if pos < logits.shape[0]:
+                log_prob = F.log_softmax(logits[pos], dim=-1)[token_id].item()
+                log_probs.append(log_prob)
+        
+        # Return average log probability
+        return np.mean(log_probs) if len(log_probs) > 0 else -100.0
+        
+    finally:
+        # Always clear injection
+        if edit_id is not None:
+            editor.injector.clear()
+
+
+def compute_batch_rewrite_quality(
+    editor: TokenEditEditor,
+    records: List[Dict],
+) -> List[Dict]:
+    """
+    Compute rewrite quality for a batch of records
+    
+    Uses logits-based evaluation for accuracy
+
+    Args:
+        editor: TokenEdit editor instance
+        records: List of edit request records
+
+    Returns:
+        List of metric dictionaries
+    """
+    metrics_list = []
+    
+    for record in records:
+        metrics = compute_rewrite_quality_logits(editor, record)
+        metrics_list.append(metrics)
+    
+    return metrics_list
+
+
+def evaluate_model(
+    model_name: str = "gpt2-xl",
+    num_samples: int = 100,
+    num_epochs: int = None,
+):
+    """
+    Main evaluation function
+
+    Args:
+        model_name: Model name
+        num_samples: Number of samples to evaluate
+        num_epochs: Override num_epochs from config
+    """
+    print("=" * 70)
+    print(f"TokenEdit Evaluation - {model_name}")
+    print("=" * 70)
+
+    # [1/4] Load model
+    print("\n[1/4] Loading model...")
+    model, tokenizer, _ = load_model_optimized(model_name)
+
+    # [2/4] Load data
+    print("\n[2/4] Loading data...")
+    requests = load_data(num_samples)
+    print(f"Loaded {len(requests)} edit samples")
+
+    # [3/4] Create editor
+    print("\n[3/4] Creating editor...")
+    hparams = load_hparams_from_json(model_name)
+
+    if num_epochs is not None:
+        print(f"  Overriding num_epochs: {hparams.num_epochs} -> {num_epochs}")
+        hparams.num_epochs = num_epochs
+
+    hparams.device = "cuda" if torch.cuda.is_available() else "cpu"
+    hparams.verbose = True
+
+    editor = TokenEditEditor(model, tokenizer, hparams)
+
+    # [4/4] Apply edits
+    print("\n[4/4] Applying edits...")
+    start_time = time.time()
+    try:
+        result = editor.apply_edits(requests)
+        edit_time = time.time() - start_time
+        print(f"  Edits applied in {edit_time:.2f}s")
+        
+        # Print training stats
+        stats = result['stats']
+        print(f"\n  Training stats:")
+        print(f"    Initial loss: {stats['losses'][0]:.4f}")
+        print(f"    Final loss: {stats['losses'][-1]:.4f}")
+        print(f"    Loss reduction: {(stats['losses'][0] - stats['losses'][-1]) / stats['losses'][0] * 100:.1f}%")
+        
+        # Check edit module status
+        print(f"\n  Edit module status:")
+        print(f"    Number of edits: {editor.edit_module.num_edits}")
+        print(f"    Alpha mean: {editor.edit_module.alpha.mean().item():.4f}")
+        print(f"    Alpha min/max: {editor.edit_module.alpha.min().item():.4f} / {editor.edit_module.alpha.max().item():.4f}")
+        print(f"    v_new norm mean: {torch.norm(editor.edit_module.v_new, dim=-1).mean().item():.4f}")
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            print("  Out of memory! Try reducing samples or epochs")
+            return
+        raise
+
+    # Evaluate
+    print(f"\n[Evaluating] Computing rewrite quality metrics (logits-based)...")
+    
+    results = []
+    efficacy_list = []
+    generalization_list = []
+    specificity_list = []
+
+    # Process each sample
+    for i, req in enumerate(tqdm(requests, desc="Evaluating")):
+        metrics = compute_rewrite_quality_logits(editor, req)
+        
+        result = {
+            "case_id": req['case_id'],
+            "requested_rewrite": {
+                "prompt": req['prompt'],
+                "subject": req['subject'],
+                "target_new": req['target_new'],
+                "target_true": req['target_true']
+            },
+            "metrics": metrics
+        }
+        results.append(result)
+
+        efficacy_list.append(metrics["efficacy"])
+        generalization_list.append(metrics["generalization"])
+        specificity_list.append(metrics["specificity"])
+        
+        # Debug output for first few samples
+        if i < 3:
+            print(f"\nSample {i}:")
+            print(f"  Prompt: {req['prompt'].format(req['subject'])}")
+            print(f"  Target new: {req['target_new']}, Target true: {req['target_true']}")
+            print(f"  Efficacy: {metrics['efficacy']:.2%}")
+            print(f"  Generalization: {metrics['generalization']:.2%}")
+            print(f"  Specificity: {metrics['specificity']:.2%}")
+
+    # Summary statistics
+    summary = {
+        "num_samples": num_samples,
+        "num_epochs": hparams.num_epochs,
+        "edit_time": edit_time,
+        "efficacy_mean": np.mean(efficacy_list),
+        "efficacy_std": np.std(efficacy_list),
+        "generalization_mean": np.mean(generalization_list),
+        "generalization_std": np.std(generalization_list),
+        "specificity_mean": np.mean(specificity_list),
+        "specificity_std": np.std(specificity_list),
+        "results": results
+    }
+
+    # Print summary
+    print("\n" + "=" * 70)
+    print("Evaluation Summary")
+    print("=" * 70)
+    print(f"Efficacy:       {summary['efficacy_mean']:.2%} ± {summary['efficacy_std']:.2%}")
+    print(f"Generalization: {summary['generalization_mean']:.2%} ± {summary['generalization_std']:.2%}")
+    print(f"Specificity:    {summary['specificity_mean']:.2%} ± {summary['specificity_std']:.2%}")
+    print(f"Edit time:      {edit_time:.2f}s")
+
+    # Save results
+    Path("results").mkdir(exist_ok=True)
+    results_file = f"results/tokenedit_{model_name.replace('/', '_')}_logits.json"
+    with open(results_file, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    print(f"\nResults saved to: {results_file}")
+
+    return summary
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Evaluate TokenEdit (Logits-based)")
+    parser.add_argument('--model', type=str, default='gpt2-xl',
+                       choices=['gpt2-xl', 'gpt-j-6b', 'llama3-8b'],
+                       help='Model name')
+    parser.add_argument('--samples', type=int, default=100,
+                       help='Number of edit samples')
+    parser.add_argument('--epochs', type=int, default=None,
+                       help='Number of training epochs (default: use JSON config)')
+
+    args = parser.parse_args()
+
+    evaluate_model(
+        model_name=args.model,
+        num_samples=args.samples,
+        num_epochs=args.epochs
+    )
