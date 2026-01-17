@@ -266,35 +266,51 @@ class TokenEditEditor:
 
         # 优化3: 动态调整批量大小以充分利用80GB显存
         # A800 80GB可以处理更大的batch size
-        effective_batch_size = min(64, max(32, len(all_samples) // 10))
+        desired_batch_size = min(64, max(32, len(all_samples) // 10))
+        micro_batch_size = min(16, desired_batch_size)
+        grad_accum_steps = max(1, int(np.ceil(desired_batch_size / micro_batch_size)))
 
         if self.hparams.verbose:
-            print(f"  使用批量大小: {effective_batch_size}")
-            expected_iterations = (len(all_samples) + effective_batch_size - 1) // effective_batch_size
-            print(f"  预计每个epoch迭代次数: {expected_iterations}")
+            print(f"  Batch size: {desired_batch_size}")
+            print(f"  Micro batch: {micro_batch_size} | Accum steps: {grad_accum_steps}")
+            expected_iterations = (len(all_samples) + desired_batch_size - 1) // desired_batch_size
+            print(f"  Expected iters/epoch: {expected_iterations}")
 
-        # 训练循环
+        # training loop
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
             num_batches = 0
             
-            # 打乱样本
+            # shuffle samples
             indices = np.random.permutation(len(all_samples))
             
-            for batch_start in range(0, len(all_samples), effective_batch_size):
-                batch_end = min(batch_start + effective_batch_size, len(all_samples))
+            optimizer.zero_grad()
+            accum_loss = 0.0
+            accum_count = 0
+            effective_accum = grad_accum_steps * micro_batch_size
+
+            for batch_start in range(0, len(all_samples), micro_batch_size):
+                batch_end = min(batch_start + micro_batch_size, len(all_samples))
                 batch_indices = indices[batch_start:batch_end]
                 batch_samples = [all_samples[i] for i in batch_indices]
                 
-                optimizer.zero_grad()
-                
-                # 计算损失
-                batch_loss = self._compute_batch_loss_fast(batch_samples)
-                
-                if batch_loss is not None and batch_loss.requires_grad:
-                    # 混合精度反向传播
+                for sample in batch_samples:
+                    sample_loss = self._compute_batch_loss_fast([sample])
+                    
+                    if sample_loss is not None and sample_loss.requires_grad:
+                        # mixed-precision backward
+                        scaled_loss = sample_loss / effective_accum
+                        if self.use_amp:
+                            self.scaler.scale(scaled_loss).backward()
+                        else:
+                            scaled_loss.backward()
+                        
+                        accum_loss += sample_loss.item()
+                        accum_count += 1
+
+                step_now = (accum_count % effective_accum == 0) or (batch_end == len(all_samples))
+                if step_now and accum_count > 0:
                     if self.use_amp:
-                        self.scaler.scale(batch_loss).backward()
                         self.scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(
                             self.edit_module.parameters(),
@@ -303,43 +319,45 @@ class TokenEditEditor:
                         self.scaler.step(optimizer)
                         self.scaler.update()
                     else:
-                        batch_loss.backward()
                         torch.nn.utils.clip_grad_norm_(
                             self.edit_module.parameters(),
                             self.hparams.gradient_clip
                         )
                         optimizer.step()
-                    
-                    epoch_loss += batch_loss.item()
-                    num_batches += 1
-                
-                # 强制参数裁剪
-                with torch.no_grad():
-                    max_v_norm = 2.0
-                    max_alpha = 2.0
-                    
-                    if not self.hparams.use_low_rank:
-                        v_new_norms = torch.norm(self.edit_module.v_new, dim=-1, keepdim=True)
-                        scale_new = torch.clamp(max_v_norm / (v_new_norms + 1e-8), max=1.0)
-                        self.edit_module.v_new.data *= scale_new
-                        
-                        v_old_norms = torch.norm(self.edit_module.v_old, dim=-1, keepdim=True)
-                        scale_old = torch.clamp(max_v_norm / (v_old_norms + 1e-8), max=1.0)
-                        self.edit_module.v_old.data *= scale_old
-                    
-                    self.edit_module.alpha.data.clamp_(0.0, max_alpha)
-                    self.edit_module.beta.data.clamp_(-max_alpha, max_alpha)
 
-            # 更新学习率
+                    optimizer.zero_grad()
+                    epoch_loss += accum_loss / accum_count
+                    num_batches += 1
+                    accum_loss = 0.0
+                    accum_count = 0
+                
+                    # clamp parameters
+                    with torch.no_grad():
+                        max_v_norm = 2.0
+                        max_alpha = 2.0
+                        
+                        if not self.hparams.use_low_rank:
+                            v_new_norms = torch.norm(self.edit_module.v_new, dim=-1, keepdim=True)
+                            scale_new = torch.clamp(max_v_norm / (v_new_norms + 1e-8), max=1.0)
+                            self.edit_module.v_new.data *= scale_new
+                            
+                            v_old_norms = torch.norm(self.edit_module.v_old, dim=-1, keepdim=True)
+                            scale_old = torch.clamp(max_v_norm / (v_old_norms + 1e-8), max=1.0)
+                            self.edit_module.v_old.data *= scale_old
+                        
+                        self.edit_module.alpha.data.clamp_(0.0, max_alpha)
+                        self.edit_module.beta.data.clamp_(-max_alpha, max_alpha)
+
+            # update learning rate
             if scheduler is not None:
                 scheduler.step()
 
-            # 记录统计
+            # record stats
             if num_batches > 0:
                 avg_loss = epoch_loss / num_batches
                 stats['losses'].append(avg_loss)
 
-            # 打印进度
+            # print progress
             if (epoch + 1) % 10 == 0 and self.hparams.verbose:
                 print(f"\nEpoch {epoch+1}/{self.hparams.num_epochs}")
                 print(f"  Total Loss: {stats['losses'][-1]:.4f}")
