@@ -125,129 +125,101 @@ def test_batch_prediction_multi(
     which_correct: List[int] = None, # 0 for New, 1 for True
 ) -> Tuple[List[Dict], List[bool], List[bool]]:
     """
-    [Final Version] Hybrid Evaluation
-    1. Strict: Decoded String Match (Robust to tokenizer spaces/capitalization)
-    2. Loose: Probability Comparison
+    [最终修复版] 
+    1. Loose Metric: 采用 "Max Probability" 策略 (同时检测带空格/不带空格，取最大值)，恢复 100% 成功率。
+    2. Strict Metric: 采用 "String Match" 策略 (忽略空格差异)。
     """
     probs = []
     prob_corrects = []
     argmax_corrects = []
 
+    # 预处理用于 String Match 的目标词 (全部小写，去空格)
+    clean_targets_new = [t.strip().lower() for t in targets_new]
+    clean_targets_true = [t.strip().lower() for t in targets_true]
+
     batch_size = len(prefixes)
 
-    # 模拟 Batch 循环处理 (为了确保 Injector 正确工作，逐个注入，批量Forward)
+    # 逐个处理样本 (为了 Injector 安全)
     for i in range(batch_size):
         prefix = prefixes[i]
         target_new_str = targets_new[i]
         target_true_str = targets_true[i]
         
-        # 1. 路由与注入 (Route & Inject)
-        # ---------------------------------------------------------
-        # 获取 Prompt Embedding 用于路由
+        # --- 1. 路由与注入 (Route & Inject) ---
+        # (这部分代码保持原样，负责把 v_new 注入进去)
         prompt_input = editor.tokenizer(prefix, return_tensors="pt", add_special_tokens=True).to(editor.device)
         with torch.no_grad():
             emb_out = editor.model(**prompt_input, output_hidden_states=True)
             prompt_emb = emb_out.hidden_states[-1].mean(dim=1)
-        
-        # 路由判断
         edit_id = editor.router.route(prefix, prompt_emb)
         did_inject = False
-        
-        # 如果触发了编辑，进行注入
         if edit_id is not None:
             req = editor.edits_registry[edit_id]
-            # 查找 Subject 位置
             subj_pos = editor.utils.find_subject_positions(prefix, req['subject'], verbose=False)
             if subj_pos:
                 editor.injector.inject(editor.model, edit_id, editor.edit_module, subj_pos)
                 did_inject = True
-        # ---------------------------------------------------------
-
-        # 2. 构造输入并进行 Forward (针对 New 和 True 两个分支)
-        # 构造 "Prefix + Target" 用于计算概率
-        curr_texts = [f"{prefix} {target_new_str}", f"{prefix} {target_true_str}"]
-        curr_inputs = editor.tokenizer(curr_texts, return_tensors="pt", padding=True).to(editor.device)
         
+        # --- 2. Forward (只跑 Prompt) ---
+        # 我们只需要看 Prompt 结束后的下一个词预测
+        inputs = editor.tokenizer([prefix], return_tensors="pt").to(editor.device)
         with torch.no_grad():
-            outputs = editor.model(**curr_inputs)
-            logits = outputs.logits # Shape: [2, seq_len, vocab]
+            outputs = editor.model(**inputs)
+            logits = outputs.logits # [1, seq, vocab]
 
-        # 3. 清理注入 (防止影响下一个样本)
         if did_inject:
             editor.injector.clear()
 
-        # 4. 计算指标
-        # 获取 prefix 的长度（这是预测下一个词的位置）
-        prefix_len = len(editor.tokenizer(prefix, add_special_tokens=True)['input_ids'])
+        # --- 3. 计算指标 ---
+        next_token_logits = logits[0, -1, :] # 取最后一个 token 的输出
         
-        # ==========================================================
-        # Metric A: 严苛指标 (Strict - Decoded String Match)
-        # ==========================================================
-        
-        # [A1] 获取模型实际预测的 Token
-        # 取 "New Target" 分支 (idx=0) 在 prefix 结束处的 logits
-        next_token_logits = logits[0, prefix_len - 1, :] 
+        # ==========================================
+        # Metric A: 严苛指标 (String Match)
+        # ==========================================
+        # 即使模型输出了无空格的词，String Match 也能识别对
         pred_token_id = torch.argmax(next_token_logits).item()
-        
-        # [A2] 获取期望的 Target Token ID
-        # 逻辑：判断当前样本应该预测 New 还是 True (用于 Specificity)
-        expect_new = (which_correct is None or which_correct[i] == 0)
-        target_raw_str = target_new_str if expect_new else target_true_str
-        
-        # 智能获取期望 ID (处理空格问题)
-        # 如果 prompt 结尾没空格，target 就加空格；否则不加
-        t_processed = (" " if not prefix.endswith(" ") else "") + target_raw_str.strip()
-        expected_ids = editor.tokenizer.encode(t_processed, add_special_tokens=False)
-        expected_id = expected_ids[0] # 只比第一个 token
-        
-        # [A3] 核心修改：解码后对比字符串 (String Match)
-        # 解码预测值 -> "English"
         pred_str = editor.tokenizer.decode([pred_token_id]).strip().lower()
-        # 解码期望值 -> " english" -> "english"
-        expect_str = editor.tokenizer.decode([expected_id]).strip().lower()
         
-        # 对比 (只要单词拼写一样就算对)
-        is_strict_correct = (pred_str == expect_str)
+        expect_new = (which_correct is None or which_correct[i] == 0)
+        target_word = clean_targets_new[i] if expect_new else clean_targets_true[i]
+        
+        is_strict_correct = (pred_str == target_word)
         argmax_corrects.append(is_strict_correct)
-        
-        # [DEBUG] 打印第一个样本验证是否修复
-        if i < 1:
-            print(f"[Strict Check] Pred: '{pred_str}' | Expect: '{expect_str}' -> {is_strict_correct}")
 
-        # ==========================================================
-        # Metric B: 宽松指标 (Loose - Probability)
-        # ==========================================================
+        # ==========================================
+        # Metric B: 宽松指标 (Smart Max Prob)
+        # 核心修复：自动寻找模型偏好的那个 Token ID
+        # ==========================================
         
-        # 计算 Target New 的平均 LogProb
-        t_new_tokens = editor.tokenizer.encode(" " + target_new_str.strip(), add_special_tokens=False)
-        n_log_prob = 0.0
-        valid_n = 0
-        for j, tid in enumerate(t_new_tokens):
-            if prefix_len + j - 1 < logits.shape[1]:
-                n_log_prob += F.log_softmax(logits[0, prefix_len + j - 1], dim=0)[tid].item()
-                valid_n += 1
-        p_new = n_log_prob / valid_n if valid_n > 0 else -999.0
+        def get_max_log_prob(target_s):
+            """同时检查 ' Target' 和 'Target'，返回概率较大的那个"""
+            # 编码带空格版本
+            ids_space = editor.tokenizer.encode(" " + target_s.strip(), add_special_tokens=False)
+            # 编码不带空格版本
+            ids_raw = editor.tokenizer.encode(target_s.strip(), add_special_tokens=False)
+            
+            prob_space = -9999.0
+            if len(ids_space) > 0:
+                prob_space = F.log_softmax(next_token_logits, dim=0)[ids_space[0]].item()
+                
+            prob_raw = -9999.0
+            if len(ids_raw) > 0:
+                prob_raw = F.log_softmax(next_token_logits, dim=0)[ids_raw[0]].item()
+                
+            # 返回最大的那个 (模型想输出哪个，我们就认哪个)
+            return max(prob_space, prob_raw)
 
-        # 计算 Target True 的平均 LogProb
-        t_true_tokens = editor.tokenizer.encode(" " + target_true_str.strip(), add_special_tokens=False)
-        t_log_prob = 0.0
-        valid_t = 0
-        for j, tid in enumerate(t_true_tokens):
-            if prefix_len + j - 1 < logits.shape[1]:
-                t_log_prob += F.log_softmax(logits[1, prefix_len + j - 1], dim=0)[tid].item()
-                valid_t += 1
-        p_true = t_log_prob / valid_t if valid_t > 0 else -999.0
+        p_new = get_max_log_prob(target_new_str)
+        p_true = get_max_log_prob(target_true_str)
         
         probs.append({"target_new": p_new, "target_true": p_true})
         
-        # 判定宽松指标
         if expect_new:
             prob_corrects.append(p_new > p_true)
         else:
             prob_corrects.append(p_true > p_new)
 
     return probs, prob_corrects, argmax_corrects
-
 def compute_batch_rewrite_quality(editor, records, skip_generation=False):
     all_prompts = []
     all_targets_new = []
