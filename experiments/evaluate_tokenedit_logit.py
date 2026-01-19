@@ -125,130 +125,122 @@ def test_batch_prediction_multi(
     which_correct: List[int] = None, # 0 for New, 1 for True
 ) -> Tuple[List[Dict], List[bool], List[bool]]:
     """
-    Evaluates a batch of prompts.
-    Returns: (probs, prob_corrects_loose, argmax_corrects_strict)
+    [Final Version] Hybrid Evaluation
+    1. Strict: Decoded String Match (Robust to tokenizer spaces/capitalization)
+    2. Loose: Probability Comparison
     """
-    # === 1. Prepare Target IDs for Argmax Comparison ===
-    target_ids_for_strict_eval = []
-    
-    for i, (p, t_new, t_true) in enumerate(zip(prefixes, targets_new, targets_true)):
-        # Determine which target we expect (New or True/Old)
-        expect_new = (which_correct is None or which_correct[i] == 0)
-        target_str = t_new if expect_new else t_true
-        
-        # Get the correct ID considering context
-        tid = get_target_token_id(editor, p, target_str)
-        target_ids_for_strict_eval.append(tid)
-
-    # === 2. Route & Inject Edits ===
-    # For routing, we process one by one (or batch if router supports it). 
-    # Here we stick to your original loop logic for safety but batched forward pass.
-    
-    # Identify which edits need to be active. 
-    # Since inputs can be diverse, we check routing for each.
-    # Note: For speed, we assume the whole batch belongs to related edits or we inject dynamically.
-    # To keep it simple and accurate for this script: We assume the editor state is cleared.
-    
-    # !! Important !!: Evaluating with different active edits in one batch requires 
-    # the Injector to support batch_edit_ids. If your injector doesn't support it,
-    # we must fall back to size=1 or grouped batches.
-    # Assuming standard implementation: We inject per sample.
-    
-    # Prepare batch inputs
-    # We construct "Prefix + Target" to calculate probabilities
-    texts_new = [f"{p} {t}" for p, t in zip(prefixes, targets_new)]
-    texts_true = [f"{p} {t}" for p, t in zip(prefixes, targets_true)]
-    all_texts = texts_new + texts_true # [Batch_New..., Batch_True...]
-    
-    inputs = editor.tokenizer(all_texts, padding=True, return_tensors="pt").to(editor.device)
-    batch_size = len(prefixes)
-    
-    # We need to perform injections. 
-    # Since current LayerInjector might only support one active edit at a time globally,
-    # or requires batch-specific logic, we'll iterate to be safe and correct.
-    # (If your code supports batch injection, this can be optimized)
-    
     probs = []
     prob_corrects = []
     argmax_corrects = []
 
-    # Iterate one by one to ensure correct injection per sample
-    # (Slow but correct. For A800 batching, you'd modify Injector)
+    batch_size = len(prefixes)
+
+    # 模拟 Batch 循环处理 (为了确保 Injector 正确工作，逐个注入，批量Forward)
     for i in range(batch_size):
         prefix = prefixes[i]
-        t_new_tokens = editor.tokenizer.encode(" " + targets_new[i].strip(), add_special_tokens=False)
-        t_true_tokens = editor.tokenizer.encode(" " + targets_true[i].strip(), add_special_tokens=False)
+        target_new_str = targets_new[i]
+        target_true_str = targets_true[i]
         
-        # 1. Routing & Injection
+        # 1. 路由与注入 (Route & Inject)
+        # ---------------------------------------------------------
+        # 获取 Prompt Embedding 用于路由
         prompt_input = editor.tokenizer(prefix, return_tensors="pt", add_special_tokens=True).to(editor.device)
         with torch.no_grad():
             emb_out = editor.model(**prompt_input, output_hidden_states=True)
             prompt_emb = emb_out.hidden_states[-1].mean(dim=1)
         
+        # 路由判断
         edit_id = editor.router.route(prefix, prompt_emb)
         did_inject = False
         
+        # 如果触发了编辑，进行注入
         if edit_id is not None:
             req = editor.edits_registry[edit_id]
-            # Use 'subject' from request, assuming it's available
+            # 查找 Subject 位置
             subj_pos = editor.utils.find_subject_positions(prefix, req['subject'], verbose=False)
             if subj_pos:
                 editor.injector.inject(editor.model, edit_id, editor.edit_module, subj_pos)
                 did_inject = True
+        # ---------------------------------------------------------
 
-        # 2. Forward Pass (New & True)
-        # We need to compute P(new|prefix) and P(true|prefix)
-        # Construct specific inputs for this sample
-        curr_texts = [f"{prefix} {targets_new[i]}", f"{prefix} {targets_true[i]}"]
+        # 2. 构造输入并进行 Forward (针对 New 和 True 两个分支)
+        # 构造 "Prefix + Target" 用于计算概率
+        curr_texts = [f"{prefix} {target_new_str}", f"{prefix} {target_true_str}"]
         curr_inputs = editor.tokenizer(curr_texts, return_tensors="pt", padding=True).to(editor.device)
         
         with torch.no_grad():
             outputs = editor.model(**curr_inputs)
-            logits = outputs.logits # [2, seq_len, vocab]
+            logits = outputs.logits # Shape: [2, seq_len, vocab]
 
-        # 3. Clear Injection
+        # 3. 清理注入 (防止影响下一个样本)
         if did_inject:
             editor.injector.clear()
 
-        # 4. Calculate Metrics
+        # 4. 计算指标
+        # 获取 prefix 的长度（这是预测下一个词的位置）
         prefix_len = len(editor.tokenizer(prefix, add_special_tokens=True)['input_ids'])
         
-        # --- Strict Argmax Check ---
-        # We look at the logits of the NEW target branch (index 0) at the end of prefix
-        # This predicts the NEXT token
-        next_token_logits = logits[0, prefix_len - 1, :]
-        pred_token_id = torch.argmax(next_token_logits).item()
-        expected_id = target_ids_for_strict_eval[i]
+        # ==========================================================
+        # Metric A: 严苛指标 (Strict - Decoded String Match)
+        # ==========================================================
         
-        is_strict_correct = (pred_token_id == expected_id)
+        # [A1] 获取模型实际预测的 Token
+        # 取 "New Target" 分支 (idx=0) 在 prefix 结束处的 logits
+        next_token_logits = logits[0, prefix_len - 1, :] 
+        pred_token_id = torch.argmax(next_token_logits).item()
+        
+        # [A2] 获取期望的 Target Token ID
+        # 逻辑：判断当前样本应该预测 New 还是 True (用于 Specificity)
+        expect_new = (which_correct is None or which_correct[i] == 0)
+        target_raw_str = target_new_str if expect_new else target_true_str
+        
+        # 智能获取期望 ID (处理空格问题)
+        # 如果 prompt 结尾没空格，target 就加空格；否则不加
+        t_processed = (" " if not prefix.endswith(" ") else "") + target_raw_str.strip()
+        expected_ids = editor.tokenizer.encode(t_processed, add_special_tokens=False)
+        expected_id = expected_ids[0] # 只比第一个 token
+        
+        # [A3] 核心修改：解码后对比字符串 (String Match)
+        # 解码预测值 -> "English"
+        pred_str = editor.tokenizer.decode([pred_token_id]).strip().lower()
+        # 解码期望值 -> " english" -> "english"
+        expect_str = editor.tokenizer.decode([expected_id]).strip().lower()
+        
+        # 对比 (只要单词拼写一样就算对)
+        is_strict_correct = (pred_str == expect_str)
         argmax_corrects.append(is_strict_correct)
         
-        # [DEBUG PRINT] - Only if enabled
-        if DEBUG_PRINT and i < 3: # Print first 3 of batch
-            print(f"\n[DEBUG Sample {i}]")
-            print(f"Prompt: ...'{prefix[-10:]}'")
-            print(f"Expect: {expected_id} ('{editor.tokenizer.decode([expected_id])}')")
-            print(f"Actual: {pred_token_id} ('{editor.tokenizer.decode([pred_token_id])}')")
-            print(f"Match:  {is_strict_correct}")
+        # [DEBUG] 打印第一个样本验证是否修复
+        if i < 1:
+            print(f"[Strict Check] Pred: '{pred_str}' | Expect: '{expect_str}' -> {is_strict_correct}")
 
-        # --- Loose Prob Check ---
-        # Calculate log_prob for New
+        # ==========================================================
+        # Metric B: 宽松指标 (Loose - Probability)
+        # ==========================================================
+        
+        # 计算 Target New 的平均 LogProb
+        t_new_tokens = editor.tokenizer.encode(" " + target_new_str.strip(), add_special_tokens=False)
         n_log_prob = 0.0
+        valid_n = 0
         for j, tid in enumerate(t_new_tokens):
             if prefix_len + j - 1 < logits.shape[1]:
                 n_log_prob += F.log_softmax(logits[0, prefix_len + j - 1], dim=0)[tid].item()
-        p_new = n_log_prob / len(t_new_tokens)
+                valid_n += 1
+        p_new = n_log_prob / valid_n if valid_n > 0 else -999.0
 
-        # Calculate log_prob for True
+        # 计算 Target True 的平均 LogProb
+        t_true_tokens = editor.tokenizer.encode(" " + target_true_str.strip(), add_special_tokens=False)
         t_log_prob = 0.0
+        valid_t = 0
         for j, tid in enumerate(t_true_tokens):
             if prefix_len + j - 1 < logits.shape[1]:
                 t_log_prob += F.log_softmax(logits[1, prefix_len + j - 1], dim=0)[tid].item()
-        p_true = t_log_prob / len(t_true_tokens)
+                valid_t += 1
+        p_true = t_log_prob / valid_t if valid_t > 0 else -999.0
         
         probs.append({"target_new": p_new, "target_true": p_true})
         
-        expect_new = (which_correct is None or which_correct[i] == 0)
+        # 判定宽松指标
         if expect_new:
             prob_corrects.append(p_new > p_true)
         else:
