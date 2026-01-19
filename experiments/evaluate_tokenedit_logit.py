@@ -34,7 +34,7 @@ except ImportError as e:
 
 # === Global Debug Switch ===
 # Set to True if you see 0% efficacy and want to see what the model is actually predicting
-DEBUG_PRINT = False 
+DEBUG_PRINT = True 
 # ===========================
 
 def _json_default(o: Any):
