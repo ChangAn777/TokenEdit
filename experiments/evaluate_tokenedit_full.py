@@ -407,8 +407,8 @@ def test_batch_prediction_multi(
         prefix_len = len(editor.tokenizer(prefix, add_special_tokens=True)["input_ids"])
 
         # Tokenize targets
-        target_new_tokens = editor.tokenizer(target_new, add_special_tokens=False)["input_ids"]
-        target_true_tokens = editor.tokenizer(target_true, add_special_tokens=False)["input_ids"]
+        target_new_tokens = editor.tokenizer(" " + target_new, add_special_tokens=False)["input_ids"]
+        target_true_tokens = editor.tokenizer(" " + target_true, add_special_tokens=False)["input_ids"]
 
         # 5. Forward pass WITH edit injection
         with torch.no_grad():
@@ -487,8 +487,8 @@ def test_batch_prediction(
         (probs, targets_correct) tuple
     """
     # Tokenize targets once
-    target_new_tokens = editor.tokenizer(target_new, add_special_tokens=False)["input_ids"]
-    target_true_tokens = editor.tokenizer(target_true, add_special_tokens=False)["input_ids"]
+    target_new_tokens = editor.tokenizer(" " + target_new, add_special_tokens=False)["input_ids"]
+    target_true_tokens = editor.tokenizer(" " + target_true, add_special_tokens=False)["input_ids"]
 
     # Extract probabilities
     probs = []
@@ -595,7 +595,7 @@ def compute_target_probability(editor: TokenEditEditor, prefix: str, target: str
         inputs = editor.tokenizer(full_text, return_tensors="pt").to(editor.device)
 
         prefix_len = len(editor.tokenizer(prefix)["input_ids"])
-        target_tokens = editor.tokenizer(target, add_special_tokens=False)["input_ids"]
+        target_tokens = editor.tokenizer(" " + target, add_special_tokens=False)["input_ids"]
 
         # Forward pass
         with torch.no_grad():

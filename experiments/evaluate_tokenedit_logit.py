@@ -144,8 +144,8 @@ def test_batch_prediction_multi(
 
     # 预计算所有目标的第一个 Token ID (用于 Argmax 比较)
     # 注意：这里假设 encode 后的第一个 token 就是我们要预测的词
-    target_new_first_ids = [editor.tokenizer.encode(t, add_special_tokens=False)[0] for t in targets_new]
-    target_true_first_ids = [editor.tokenizer.encode(t, add_special_tokens=False)[0] for t in targets_true]
+    target_new_first_ids = [editor.tokenizer.encode(" " + t, add_special_tokens=False)[0] for t in targets_new]
+    target_true_first_ids = [editor.tokenizer.encode(" " + t, add_special_tokens=False)[0] for t in targets_true]
 
     for i, (prefix, target_new, target_true) in enumerate(zip(prefixes, targets_new, targets_true)):
         # === 1. 路由与注入 ===
@@ -185,8 +185,8 @@ def test_batch_prediction_multi(
         prefix_len = len(editor.tokenizer(prefix, add_special_tokens=True)["input_ids"])
 
         # Tokenize targets (用于 LogProb 计算)
-        target_new_tokens = editor.tokenizer(target_new, add_special_tokens=False)["input_ids"]
-        target_true_tokens = editor.tokenizer(target_true, add_special_tokens=False)["input_ids"]
+        target_new_tokens = editor.tokenizer(" " + target_new, add_special_tokens=False)["input_ids"]
+        target_true_tokens = editor.tokenizer(" " + target_true, add_special_tokens=False)["input_ids"]
 
         # === 3. Forward Pass ===
         with torch.no_grad():
