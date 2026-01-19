@@ -177,13 +177,46 @@ class TokenEditEditor:
     
     def _train_tokens_fast(self, train_data: List[Dict]) -> Dict:
         """
-        极速训练 - 针对A800 80GB优化
+        [修改版] 极速训练 - 包含 Smart Initialization (智能初始化)
         """
         # 冻结基础模型参数
         for param in self.model.parameters():
             param.requires_grad = False
+            
+        # === [新增] Smart Initialization: 使用 Target Embedding 初始化 v_new ===
+        # 这一步至关重要，它能解决 Specificity 低的问题
+        print("  [Init] 正在应用 Smart Initialization (Target Embedding)...")
+        with torch.no_grad():
+            # 1. 获取 Embedding 层 (适配 GPT-2 / LLaMA)
+            if hasattr(self.model, "transformer"): # GPT-2
+                wte = self.model.transformer.wte
+            elif hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"): # LLaMA
+                wte = self.model.model.embed_tokens
+            else:
+                wte = self.model.get_input_embeddings()
+            
+            init_count = 0
+            for data in train_data:
+                idx = data['edit_id']
+                target_word = data['request']['target_new']
+                
+                # 2. 编码 Target (优先尝试带空格的版本 " London")
+                t_ids = self.tokenizer.encode(" " + target_word.strip(), add_special_tokens=False)
+                if len(t_ids) == 0: # 如果为空，尝试不带空格
+                    t_ids = self.tokenizer.encode(target_word.strip(), add_special_tokens=False)
+                
+                if len(t_ids) > 0:
+                    # 3. 取 Embedding (如果有多个token，取平均)
+                    target_emb = wte(torch.tensor(t_ids, device=self.device)).mean(dim=0)
+                    
+                    # 4. 赋值给 v_new (覆盖随机初始化)
+                    if not self.hparams.use_low_rank:
+                        self.edit_module.v_new.data[idx] = target_emb.clone()
+                        init_count += 1
+            print(f"  [Init] 已初始化 {init_count}/{len(train_data)} 个向量")
+        # ================================================================
         
-        # 优化器
+        # 优化器 (建议学习率设为 5e-2 或 1e-1)
         optimizer = torch.optim.AdamW(
             self.edit_module.parameters(),
             lr=self.hparams.learning_rate,
@@ -196,29 +229,11 @@ class TokenEditEditor:
                 optimizer,
                 T_max=self.hparams.num_epochs
             )
-        elif self.hparams.scheduler == "onecycle":
-            total_steps = self.hparams.num_epochs
-            scheduler = torch.optim.lr_scheduler.OneCycleLR(
-                optimizer,
-                max_lr=self.hparams.learning_rate,
-                total_steps=total_steps,
-                pct_start=0.1,
-                anneal_strategy='cos'
-            )
         else:
             scheduler = None
         
         # 训练统计
-        stats = {
-            'losses': [],
-            'loss_breakdown': {
-                'edit': [],
-                'suppress': [],
-                'ortho': [],
-                'local': [],
-                'norm': []
-            }
-        }
+        stats = {'losses': []}
 
         # 优化2: 预计算所有样本的信息
         print("  预处理训练数据...")
@@ -235,15 +250,10 @@ class TokenEditEditor:
                 subject_positions = self.utils.find_subject_positions(
                     prompt, subject, verbose=False, add_special_tokens=True
                 )
-                
                 if subject_positions:
                     all_samples.append({
-                        'edit_id': edit_id,
-                        'prompt': prompt,
-                        'target': closure.get('targets_forward', ''),
-                        'old_target': closure.get('targets_backward', ''),
-                        'type': 'forward',
-                        'subject_positions': subject_positions
+                        'edit_id': edit_id, 'prompt': prompt, 'type': 'forward', 'subject_positions': subject_positions,
+                        'target': closure.get('targets_forward', ''), 'old_target': closure.get('targets_backward', '')
                     })
             
             # Backward samples
@@ -251,39 +261,25 @@ class TokenEditEditor:
                 subject_positions = self.utils.find_subject_positions(
                     prompt, subject, verbose=False, add_special_tokens=True
                 )
-                
                 if subject_positions:
                     all_samples.append({
-                        'edit_id': edit_id,
-                        'prompt': prompt,
-                        'target': None,
-                        'old_target': None,
-                        'type': 'backward',
-                        'subject_positions': subject_positions
+                        'edit_id': edit_id, 'prompt': prompt, 'type': 'backward', 'subject_positions': subject_positions,
+                        'target': None, 'old_target': None
                     })
         
         print(f"  预处理完成: {len(all_samples)} 个有效样本")
 
-        # 优化3: 动态调整批量大小以充分利用80GB显存
-        # A800 80GB可以处理更大的batch size
+        # 优化3: 动态调整批量大小
         desired_batch_size = min(64, max(32, len(all_samples) // 10))
         micro_batch_size = min(16, desired_batch_size)
         grad_accum_steps = max(1, int(np.ceil(desired_batch_size / micro_batch_size)))
 
-        if self.hparams.verbose:
-            print(f"  Batch size: {desired_batch_size}")
-            print(f"  Micro batch: {micro_batch_size} | Accum steps: {grad_accum_steps}")
-            expected_iterations = (len(all_samples) + desired_batch_size - 1) // desired_batch_size
-            print(f"  Expected iters/epoch: {expected_iterations}")
-
-        # training loop
+        # Training loop
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
             num_batches = 0
             
-            # shuffle samples
             indices = np.random.permutation(len(all_samples))
-            
             optimizer.zero_grad()
             accum_loss = 0.0
             accum_count = 0
@@ -294,17 +290,15 @@ class TokenEditEditor:
                 batch_indices = indices[batch_start:batch_end]
                 batch_samples = [all_samples[i] for i in batch_indices]
                 
+                # Forward & Backward
                 for sample in batch_samples:
                     sample_loss = self._compute_batch_loss_fast([sample])
-                    
                     if sample_loss is not None and sample_loss.requires_grad:
-                        # mixed-precision backward
                         scaled_loss = sample_loss / effective_accum
                         if self.use_amp:
                             self.scaler.scale(scaled_loss).backward()
                         else:
                             scaled_loss.backward()
-                        
                         accum_loss += sample_loss.item()
                         accum_count += 1
 
@@ -312,17 +306,11 @@ class TokenEditEditor:
                 if step_now and accum_count > 0:
                     if self.use_amp:
                         self.scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.edit_module.parameters(),
-                            self.hparams.gradient_clip
-                        )
+                        torch.nn.utils.clip_grad_norm_(self.edit_module.parameters(), self.hparams.gradient_clip)
                         self.scaler.step(optimizer)
                         self.scaler.update()
                     else:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.edit_module.parameters(),
-                            self.hparams.gradient_clip
-                        )
+                        torch.nn.utils.clip_grad_norm_(self.edit_module.parameters(), self.hparams.gradient_clip)
                         optimizer.step()
 
                     optimizer.zero_grad()
@@ -333,34 +321,14 @@ class TokenEditEditor:
                 
                     # clamp parameters
                     with torch.no_grad():
-                        max_v_norm = 2.0
-                        max_alpha = 2.0
-                        
-                        if not self.hparams.use_low_rank:
-                            v_new_norms = torch.norm(self.edit_module.v_new, dim=-1, keepdim=True)
-                            scale_new = torch.clamp(max_v_norm / (v_new_norms + 1e-8), max=1.0)
-                            self.edit_module.v_new.data *= scale_new
-                            
-                            v_old_norms = torch.norm(self.edit_module.v_old, dim=-1, keepdim=True)
-                            scale_old = torch.clamp(max_v_norm / (v_old_norms + 1e-8), max=1.0)
-                            self.edit_module.v_old.data *= scale_old
-                        
-                        self.edit_module.alpha.data.clamp_(0.0, max_alpha)
-                        self.edit_module.beta.data.clamp_(-max_alpha, max_alpha)
+                        self.edit_module.alpha.data.clamp_(0.0, 2.0)
+                        self.edit_module.beta.data.clamp_(-2.0, 2.0)
 
-            # update learning rate
-            if scheduler is not None:
-                scheduler.step()
-
-            # record stats
-            if num_batches > 0:
-                avg_loss = epoch_loss / num_batches
-                stats['losses'].append(avg_loss)
-
-            # print progress
+            if scheduler: scheduler.step()
+            if num_batches > 0: stats['losses'].append(epoch_loss / num_batches)
+            
             if (epoch + 1) % 10 == 0 and self.hparams.verbose:
-                print(f"\nEpoch {epoch+1}/{self.hparams.num_epochs}")
-                print(f"  Total Loss: {stats['losses'][-1]:.4f}")
+                print(f"  Epoch {epoch+1} Loss: {stats['losses'][-1]:.4f}")
 
         return stats
     
