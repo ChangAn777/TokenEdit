@@ -13,7 +13,7 @@ class TokenEditHyperParams:
     target_layers: Optional[List[int]] = None  # None表示自动设置
     
     # Token配置
-    token_init_method: str = "random"
+    token_init_method: str = "target_smart"
     token_init_std: float = 0.1  # 增加初始化标准差，避免向量太小
     learnable_gates: bool = True
     use_low_rank: bool = False
