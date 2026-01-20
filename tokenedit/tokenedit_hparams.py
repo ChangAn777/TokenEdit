@@ -1,4 +1,4 @@
-"""TokenEdit超参数配置"""
+"""TokenEdit超参数配置 (SOTA Defaults)"""
 
 from dataclasses import dataclass
 from typing import List, Optional
@@ -10,29 +10,31 @@ class TokenEditHyperParams:
     
     # 模型配置
     model_name: str = "gpt2-xl"
-    target_layers: Optional[List[int]] = None  # None表示自动设置
+    # 推荐不要在这里写死具体层数，让 main.py 自动根据模型推断
+    target_layers: Optional[List[int]] = None  
     
     # Token配置
+    # [修改] 默认使用智能初始化
     token_init_method: str = "target_smart"
-    token_init_std: float = 0.1  # 增加初始化标准差，避免向量太小
+    token_init_std: float = 0.1
     learnable_gates: bool = True
     use_low_rank: bool = False
     token_rank: int = 64
     
     # 训练配置
     num_epochs: int = 100
-    learning_rate: float = 1e-3
+    learning_rate: float = 5e-2  # [修改] 提高学习率 (Smart Init 需要)
     batch_size: int = 4
     optimizer: str = "adam"
     scheduler: str = "cosine"
     warmup_steps: int = 10
     gradient_clip: float = 1.0
     
-    # 损失权重
-    w_edit: float = 1.0
-    w_suppress: float = 0.5
-    w_ortho: float = 0.3
-    w_local: float = 0.2
+    # 损失权重 (SOTA值)
+    w_edit: float = 10.0      # [修改] 加大火力，从 1.0 -> 10.0
+    w_suppress: float = 1.0   # [修改] 适度抑制，从 0.5 -> 1.0
+    w_ortho: float = 0.01     # [修改] 放松约束，从 0.3 -> 0.01
+    w_local: float = 2.0      # [修改] 保护邻居，从 0.2 -> 2.0
     
     # 正交约束
     ortho_prompt_lambda: float = 1.0
@@ -40,9 +42,9 @@ class TokenEditHyperParams:
     ortho_method: str = "inner_product"
     
     # 路由配置
-    routing_threshold: float = 0.3  # 降低阈值，使路由更容易触发
+    routing_threshold: float = 0.98    # [修改] 提高门槛，从 0.3 -> 0.98
     use_embedding_routing: bool = True
-    use_template_routing: bool = True  # 优先使用模板匹配
+    use_template_routing: bool = False # [修改] 默认关闭模板路由 (解决 Specificity 的关键)
     routing_aggregation: str = "max"
     
     # Prompt闭包
