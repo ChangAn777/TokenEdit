@@ -19,7 +19,7 @@
   "ortho_prompt_lambda": 1.0,
   "ortho_token_lambda": 1.0,
   "ortho_method": "inner_product",
-  "routing_threshold": 0.88,
+  "routing_threshold": 0.98,
   "use_embedding_routing": true,
   "use_template_routing": false,
   "routing_aggregation": "max",
