@@ -67,6 +67,8 @@ class EditTokenModule(nn.Module):
         elif method == "normal":
             return torch.normal(0, self.hparams.token_init_std, 
                               size=(num_edits, hidden_size))
+        elif self.hparams.token_init_method == "target_smart":
+            nn.init.normal_(self.v_new, std=self.hparams.token_init_std)
         else:
             raise ValueError(f"Unknown init method: {method}")
     
