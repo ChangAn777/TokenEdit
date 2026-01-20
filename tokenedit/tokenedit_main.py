@@ -179,6 +179,14 @@ class TokenEditEditor:
         """
         [修改版] 极速训练 - 包含 Smart Initialization (智能初始化)
         """
+
+        print("\n" + "="*40)
+        print("[DEBUG] 正在检查生效参数...")
+        print(f"  > w_edit (期望 10.0):   {self.hparams.w_edit}")
+        print(f"  > threshold (期望 0.98): {self.hparams.routing_threshold}")
+        print(f"  > init_method:          {self.hparams.token_init_method}")
+        print(f"  > target_layers:        {self.hparams.target_layers}")
+        print("="*40 + "\n")
         # 冻结基础模型参数
         for param in self.model.parameters():
             param.requires_grad = False
