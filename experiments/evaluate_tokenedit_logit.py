@@ -126,7 +126,7 @@ def test_batch_prediction_multi(
     which_correct: List[int] = None, # 0 for New, 1 for True
     edit_ids: List[int] = None,
     allow_subjectless: List[bool] = None,
-) -> Tuple[List[Dict], List[bool], List[bool]]:
+) -> Tuple[List[Dict], List[bool], List[bool], Dict[str, int]]:
     """
     1. Loose metric: Max probability for target token.
     2. Strict metric: Greedy multi-token exact match for the target string.
@@ -134,6 +134,15 @@ def test_batch_prediction_multi(
     probs = []
     prob_corrects = []
     argmax_corrects = []
+    stats = {
+        "rewrite_total": 0,
+        "rewrite_inject": 0,
+        "paraphrase_total": 0,
+        "paraphrase_inject": 0,
+        "neighbor_total": 0,
+        "neighbor_inject": 0,
+        "paraphrase_subjectless": 0,
+    }
 
     clean_targets_new = [t.strip().lower() for t in targets_new]
     clean_targets_true = [t.strip().lower() for t in targets_true]
@@ -183,6 +192,7 @@ def test_batch_prediction_multi(
             if not subj_pos and allow_subjectless is not None and allow_subjectless[i]:
                 seq_len = int(prompt_input["input_ids"].shape[1])
                 subj_pos = [max(0, seq_len - 1)]
+                stats["paraphrase_subjectless"] += 1
             if subj_pos:
                 editor.injector.inject(editor.model, edit_id, editor.edit_module, subj_pos)
                 did_inject = True
@@ -193,6 +203,20 @@ def test_batch_prediction_multi(
             logits = outputs.logits  # [1, seq, vocab]
 
         expect_new = (which_correct is None or which_correct[i] == 0)
+        is_neighbor = (which_correct is not None and which_correct[i] == 1)
+        if is_neighbor:
+            stats["neighbor_total"] += 1
+            if did_inject:
+                stats["neighbor_inject"] += 1
+        else:
+            if allow_subjectless is not None and allow_subjectless[i]:
+                stats["paraphrase_total"] += 1
+                if did_inject:
+                    stats["paraphrase_inject"] += 1
+            else:
+                stats["rewrite_total"] += 1
+                if did_inject:
+                    stats["rewrite_inject"] += 1
         strict_target = target_new_str if expect_new else target_true_str
         candidate_ids = _get_candidate_token_ids(prefix, strict_target)
         if candidate_ids:
@@ -240,7 +264,7 @@ def test_batch_prediction_multi(
         else:
             prob_corrects.append(p_true > p_new)
 
-    return probs, prob_corrects, argmax_corrects
+    return probs, prob_corrects, argmax_corrects, stats
 def compute_batch_rewrite_quality(editor, records, skip_generation=False):
     all_prompts = []
     all_targets_new = []
@@ -282,7 +306,7 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
             all_allow_subjectless.append(False)
 
     # Run Batch
-    probs, loose_corr, strict_corr = test_batch_prediction_multi(
+    probs, loose_corr, strict_corr, batch_stats = test_batch_prediction_multi(
         editor,
         all_prompts,
         all_targets_new,
@@ -291,6 +315,7 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
         all_edit_ids,
         all_allow_subjectless,
     )
+    return metrics_list, batch_stats
     
     # Unpack results back to records
     metrics_list = []
@@ -354,7 +379,7 @@ def evaluate_model(model_name, num_samples, epochs=None, batch_size=20):
     
     for i in tqdm(range(0, len(requests), batch_size)):
         batch_reqs = requests[i : i+batch_size]
-        batch_metrics = compute_batch_rewrite_quality(editor, batch_reqs)
+        batch_metrics, batch_stats = compute_batch_rewrite_quality(editor, batch_reqs)
         
         for m in batch_metrics:
             m_loose["eff"].append(m["efficacy"])
@@ -364,6 +389,13 @@ def evaluate_model(model_name, num_samples, epochs=None, batch_size=20):
             m_strict["eff"].append(m["efficacy_strict"])
             m_strict["gen"].append(m["generalization_strict"])
             m_strict["spec"].append(m["specificity_strict"])
+
+        # Aggregate injection stats
+        if i == 0:
+            stats = batch_stats
+        else:
+            for k, v in batch_stats.items():
+                stats[k] = stats.get(k, 0) + v
             
     # Print Summary
     print("\n" + "="*60)
@@ -379,6 +411,11 @@ def evaluate_model(model_name, num_samples, epochs=None, batch_size=20):
     print(f"  Generalization: {np.mean(m_strict['gen']):.2%}")
     print(f"  Specificity:    {np.mean(m_strict['spec']):.2%}")
     print("="*60)
+    print("Injection stats:")
+    print(f"  Rewrite inject rate:     {stats['rewrite_inject']}/{stats['rewrite_total']}")
+    print(f"  Paraphrase inject rate:  {stats['paraphrase_inject']}/{stats['paraphrase_total']}")
+    print(f"  Neighbor inject rate:    {stats['neighbor_inject']}/{stats['neighbor_total']}")
+    print(f"  Paraphrase subjectless:  {stats['paraphrase_subjectless']}")
     
     # Save
     save_path = f"results/tokenedit_{model_name.replace('/','_')}_final.json"
