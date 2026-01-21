@@ -172,6 +172,10 @@ def test_batch_prediction_multi(
             cur = torch.cat([cur, next_tensor], dim=1)
         return out_ids
 
+    def _greedy_decode_text(input_ids: torch.Tensor, max_len: int) -> str:
+        pred_ids = _greedy_next_tokens(input_ids, max_len)
+        return editor.tokenizer.decode(pred_ids)
+
     for i in range(batch_size):
         prefix = prefixes[i]
         target_new_str = targets_new[i]
@@ -223,8 +227,13 @@ def test_batch_prediction_multi(
             max_len = max(len(c) for c in candidate_ids)
             with torch.no_grad():
                 prompt_ids = inputs["input_ids"]
-                pred_ids = _greedy_next_tokens(prompt_ids, max_len)
-            is_strict_correct = any(pred_ids[:len(c)] == c for c in candidate_ids)
+                if is_neighbor:
+                    pred_text = _greedy_decode_text(prompt_ids, max_len + 4).strip().lower()
+                    target_text = strict_target.strip().lower()
+                    is_strict_correct = (target_text in pred_text)
+                else:
+                    pred_ids = _greedy_next_tokens(prompt_ids, max_len)
+                    is_strict_correct = any(pred_ids[:len(c)] == c for c in candidate_ids)
         else:
             is_strict_correct = False
         argmax_corrects.append(is_strict_correct)
@@ -265,6 +274,7 @@ def test_batch_prediction_multi(
             prob_corrects.append(p_true > p_new)
 
     return probs, prob_corrects, argmax_corrects, stats
+
 def compute_batch_rewrite_quality(editor, records, skip_generation=False):
     all_prompts = []
     all_targets_new = []
