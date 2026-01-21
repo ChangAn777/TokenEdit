@@ -125,28 +125,46 @@ def test_batch_prediction_multi(
     which_correct: List[int] = None, # 0 for New, 1 for True
 ) -> Tuple[List[Dict], List[bool], List[bool]]:
     """
-    [最终修复版] 
-    1. Loose Metric: 采用 "Max Probability" 策略 (同时检测带空格/不带空格，取最大值)，恢复 100% 成功率。
-    2. Strict Metric: 采用 "String Match" 策略 (忽略空格差异)。
+    1. Loose metric: Max probability for target token.
+    2. Strict metric: Greedy multi-token exact match for the target string.
     """
     probs = []
     prob_corrects = []
     argmax_corrects = []
 
-    # 预处理用于 String Match 的目标词 (全部小写，去空格)
     clean_targets_new = [t.strip().lower() for t in targets_new]
     clean_targets_true = [t.strip().lower() for t in targets_true]
 
     batch_size = len(prefixes)
 
-    # 逐个处理样本 (为了 Injector 安全)
+    def _get_candidate_token_ids(prompt: str, target_str: str) -> List[List[int]]:
+        t_clean = target_str.strip()
+        candidates = []
+        if not prompt.endswith(" "):
+            ids_space = editor.tokenizer.encode(" " + t_clean, add_special_tokens=False)
+            if ids_space:
+                candidates.append(ids_space)
+        ids_raw = editor.tokenizer.encode(t_clean, add_special_tokens=False)
+        if ids_raw and ids_raw not in candidates:
+            candidates.append(ids_raw)
+        return candidates
+
+    def _greedy_next_tokens(input_ids: torch.Tensor, max_len: int) -> List[int]:
+        cur = input_ids
+        out_ids = []
+        for _ in range(max_len):
+            outputs = editor.model(input_ids=cur)
+            next_id = torch.argmax(outputs.logits[0, -1, :]).item()
+            out_ids.append(next_id)
+            next_tensor = torch.tensor([[next_id]], device=cur.device)
+            cur = torch.cat([cur, next_tensor], dim=1)
+        return out_ids
+
     for i in range(batch_size):
         prefix = prefixes[i]
         target_new_str = targets_new[i]
         target_true_str = targets_true[i]
-        
-        # --- 1. 路由与注入 (Route & Inject) ---
-        # (这部分代码保持原样，负责把 v_new 注入进去)
+
         prompt_input = editor.tokenizer(prefix, return_tensors="pt", add_special_tokens=True).to(editor.device)
         with torch.no_grad():
             emb_out = editor.model(**prompt_input, output_hidden_states=True)
@@ -159,61 +177,55 @@ def test_batch_prediction_multi(
             if subj_pos:
                 editor.injector.inject(editor.model, edit_id, editor.edit_module, subj_pos)
                 did_inject = True
-        
-        # --- 2. Forward (只跑 Prompt) ---
-        # 我们只需要看 Prompt 结束后的下一个词预测
+
         inputs = editor.tokenizer([prefix], return_tensors="pt").to(editor.device)
         with torch.no_grad():
             outputs = editor.model(**inputs)
-            logits = outputs.logits # [1, seq, vocab]
+            logits = outputs.logits  # [1, seq, vocab]
+
+        expect_new = (which_correct is None or which_correct[i] == 0)
+        strict_target = target_new_str if expect_new else target_true_str
+        candidate_ids = _get_candidate_token_ids(prefix, strict_target)
+        if candidate_ids:
+            max_len = max(len(c) for c in candidate_ids)
+            with torch.no_grad():
+                prompt_ids = inputs["input_ids"]
+                pred_ids = _greedy_next_tokens(prompt_ids, max_len)
+            is_strict_correct = any(pred_ids[:len(c)] == c for c in candidate_ids)
+        else:
+            is_strict_correct = False
+        argmax_corrects.append(is_strict_correct)
 
         if did_inject:
             editor.injector.clear()
 
-        # --- 3. 计算指标 ---
-        next_token_logits = logits[0, -1, :] # 取最后一个 token 的输出
-        
-        # ==========================================
-        # Metric A: 严苛指标 (String Match)
-        # ==========================================
-        # 即使模型输出了无空格的词，String Match 也能识别对
+        next_token_logits = logits[0, -1, :]
+
         pred_token_id = torch.argmax(next_token_logits).item()
         pred_str = editor.tokenizer.decode([pred_token_id]).strip().lower()
-        
-        expect_new = (which_correct is None or which_correct[i] == 0)
-        target_word = clean_targets_new[i] if expect_new else clean_targets_true[i]
-        
-        is_strict_correct = (pred_str == target_word)
-        argmax_corrects.append(is_strict_correct)
 
-        # ==========================================
-        # Metric B: 宽松指标 (Smart Max Prob)
-        # 核心修复：自动寻找模型偏好的那个 Token ID
-        # ==========================================
-        
+        target_word = clean_targets_new[i] if expect_new else clean_targets_true[i]
+        _ = (pred_str == target_word)
+
         def get_max_log_prob(target_s):
-            """同时检查 ' Target' 和 'Target'，返回概率较大的那个"""
-            # 编码带空格版本
             ids_space = editor.tokenizer.encode(" " + target_s.strip(), add_special_tokens=False)
-            # 编码不带空格版本
             ids_raw = editor.tokenizer.encode(target_s.strip(), add_special_tokens=False)
-            
+
             prob_space = -9999.0
             if len(ids_space) > 0:
                 prob_space = F.log_softmax(next_token_logits, dim=0)[ids_space[0]].item()
-                
+
             prob_raw = -9999.0
             if len(ids_raw) > 0:
                 prob_raw = F.log_softmax(next_token_logits, dim=0)[ids_raw[0]].item()
-                
-            # 返回最大的那个 (模型想输出哪个，我们就认哪个)
+
             return max(prob_space, prob_raw)
 
         p_new = get_max_log_prob(target_new_str)
         p_true = get_max_log_prob(target_true_str)
-        
+
         probs.append({"target_new": p_new, "target_true": p_true})
-        
+
         if expect_new:
             prob_corrects.append(p_new > p_true)
         else:
@@ -308,6 +320,7 @@ def evaluate_model(model_name, num_samples, epochs=None, batch_size=20):
     print(f"Applying {len(requests)} edits...")
     start_time = time.time()
     editor.apply_edits(requests)
+    editor.model.eval()
     print(f"Edits done in {time.time() - start_time:.2f}s")
     
     print("Evaluating...")

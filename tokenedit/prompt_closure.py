@@ -88,6 +88,10 @@ class PromptClosureGenerator:
                 if isinstance(nb, dict):
                     prompt = nb.get("prompt", "")
                     target = nb.get("target", "")
+                else:
+                    prompt = str(nb)
+                    target = ""
+                if prompt:
                     closure["neighborhood_prompts"].append({
                         "prompt": prompt,
                         "target": target
