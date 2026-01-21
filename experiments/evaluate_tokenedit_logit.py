@@ -315,8 +315,7 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
         all_edit_ids,
         all_allow_subjectless,
     )
-    return metrics_list, batch_stats
-    
+
     # Unpack results back to records
     metrics_list = []
     cursor = 0
@@ -347,7 +346,7 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
         })
         cursor += total_qs
         
-    return metrics_list
+    return metrics_list, batch_stats
 
 def evaluate_model(model_name, num_samples, epochs=None, batch_size=20):
     print(f"Load model: {model_name}")
