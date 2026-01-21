@@ -78,6 +78,7 @@ def load_data(num_samples=100, data_dir: str = "data"):
     for item in data[:num_samples]:
         req = item['requested_rewrite']
         requests.append({
+            'edit_id': len(requests),
             'case_id': item.get('case_id', len(requests)),
             'prompt': req['prompt'],
             'subject': req['subject'],
@@ -123,6 +124,8 @@ def test_batch_prediction_multi(
     targets_new: List[str],
     targets_true: List[str],
     which_correct: List[int] = None, # 0 for New, 1 for True
+    edit_ids: List[int] = None,
+    allow_subjectless: List[bool] = None,
 ) -> Tuple[List[Dict], List[bool], List[bool]]:
     """
     1. Loose metric: Max probability for target token.
@@ -169,11 +172,17 @@ def test_batch_prediction_multi(
         with torch.no_grad():
             emb_out = editor.model(**prompt_input, output_hidden_states=True)
             prompt_emb = emb_out.hidden_states[-1].mean(dim=1)
-        edit_id = editor.router.route(prefix, prompt_emb)
+        if edit_ids is not None:
+            edit_id = edit_ids[i]
+        else:
+            edit_id = editor.router.route(prefix, prompt_emb)
         did_inject = False
         if edit_id is not None:
             req = editor.edits_registry[edit_id]
             subj_pos = editor.utils.find_subject_positions(prefix, req['subject'], verbose=False)
+            if not subj_pos and allow_subjectless is not None and allow_subjectless[i]:
+                seq_len = int(prompt_input["input_ids"].shape[1])
+                subj_pos = [max(0, seq_len - 1)]
             if subj_pos:
                 editor.injector.inject(editor.model, edit_id, editor.edit_module, subj_pos)
                 did_inject = True
@@ -237,6 +246,8 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
     all_targets_new = []
     all_targets_true = []
     all_correct = [] # 0=New, 1=True
+    all_edit_ids = []
+    all_allow_subjectless = []
     
     # Flatten records
     for record in records:
@@ -246,6 +257,8 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
         all_targets_new.append(record['target_new'])
         all_targets_true.append(record['target_true'])
         all_correct.append(0)
+        all_edit_ids.append(record.get('edit_id'))
+        all_allow_subjectless.append(False)
         
         # 2. Paraphrase Prompts (Expect New)
         paras = record.get('paraphrase_prompts', [])[:3]
@@ -254,6 +267,8 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
             all_targets_new.append(record['target_new'])
             all_targets_true.append(record['target_true'])
             all_correct.append(0)
+            all_edit_ids.append(record.get('edit_id'))
+            all_allow_subjectless.append(True)
             
         # 3. Neighborhood Prompts (Expect True)
         neighbors = record.get('neighborhood_prompts', [])[:3]
@@ -263,10 +278,18 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
             all_targets_new.append(record['target_new'])
             all_targets_true.append(record['target_true'])
             all_correct.append(1)
+            all_edit_ids.append(record.get('edit_id'))
+            all_allow_subjectless.append(False)
 
     # Run Batch
     probs, loose_corr, strict_corr = test_batch_prediction_multi(
-        editor, all_prompts, all_targets_new, all_targets_true, all_correct
+        editor,
+        all_prompts,
+        all_targets_new,
+        all_targets_true,
+        all_correct,
+        all_edit_ids,
+        all_allow_subjectless,
     )
     
     # Unpack results back to records
