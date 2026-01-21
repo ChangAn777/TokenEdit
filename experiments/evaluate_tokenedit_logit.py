@@ -126,7 +126,7 @@ def test_batch_prediction_multi(
     which_correct: List[int] = None, # 0 for New, 1 for True
     edit_ids: List[int] = None,
     allow_subjectless: List[bool] = None,
-) -> Tuple[List[Dict], List[bool], List[bool], Dict[str, int]]:
+) -> Tuple[List[Dict], List[bool], List[bool], Dict[str, int], List[bool]]:
     """
     1. Loose metric: Max probability for target token.
     2. Strict metric: Greedy multi-token exact match for the target string.
@@ -134,6 +134,7 @@ def test_batch_prediction_multi(
     probs = []
     prob_corrects = []
     argmax_corrects = []
+    neighbor_logprob_corrects = []
     stats = {
         "rewrite_total": 0,
         "rewrite_inject": 0,
@@ -270,10 +271,12 @@ def test_batch_prediction_multi(
 
         if expect_new:
             prob_corrects.append(p_new > p_true)
+            neighbor_logprob_corrects.append(False)
         else:
             prob_corrects.append(p_true > p_new)
+            neighbor_logprob_corrects.append(p_true > p_new)
 
-    return probs, prob_corrects, argmax_corrects, stats
+    return probs, prob_corrects, argmax_corrects, stats, neighbor_logprob_corrects
 
 def compute_batch_rewrite_quality(editor, records, skip_generation=False):
     all_prompts = []
@@ -316,7 +319,7 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
             all_allow_subjectless.append(False)
 
     # Run Batch
-    probs, loose_corr, strict_corr, batch_stats = test_batch_prediction_multi(
+    probs, loose_corr, strict_corr, batch_stats, neighbor_logprob_corr = test_batch_prediction_multi(
         editor,
         all_prompts,
         all_targets_new,
@@ -336,11 +339,13 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
         
         chunk_strict = strict_corr[cursor : cursor+total_qs]
         chunk_loose = loose_corr[cursor : cursor+total_qs]
+        chunk_neighbor_logprob = neighbor_logprob_corr[cursor : cursor+total_qs]
         
         # Calculate means
         eff_strict = chunk_strict[0] # First is rewrite
         gen_strict = np.mean(chunk_strict[1:1+num_paras]) if num_paras > 0 else 0.0
         spec_strict = np.mean(chunk_strict[1+num_paras:]) if num_neigh > 0 else 0.0
+        spec_logprob = np.mean(chunk_neighbor_logprob[1+num_paras:]) if num_neigh > 0 else 0.0
         
         eff_loose = chunk_loose[0]
         gen_loose = np.mean(chunk_loose[1:1+num_paras]) if num_paras > 0 else 0.0
@@ -350,6 +355,7 @@ def compute_batch_rewrite_quality(editor, records, skip_generation=False):
             "efficacy_strict": eff_strict,
             "generalization_strict": gen_strict,
             "specificity_strict": spec_strict,
+            "specificity_logprob": spec_logprob,
             "efficacy": eff_loose,
             "generalization": gen_loose,
             "specificity": spec_loose
@@ -398,6 +404,7 @@ def evaluate_model(model_name, num_samples, epochs=None, batch_size=20):
             m_strict["eff"].append(m["efficacy_strict"])
             m_strict["gen"].append(m["generalization_strict"])
             m_strict["spec"].append(m["specificity_strict"])
+            m_strict.setdefault("spec_logprob", []).append(m["specificity_logprob"])
 
         # Aggregate injection stats
         if i == 0:
@@ -419,6 +426,7 @@ def evaluate_model(model_name, num_samples, epochs=None, batch_size=20):
     print(f"  Efficacy:       {np.mean(m_strict['eff']):.2%}")
     print(f"  Generalization: {np.mean(m_strict['gen']):.2%}")
     print(f"  Specificity:    {np.mean(m_strict['spec']):.2%}")
+    print(f"  Specificity(LogProb): {np.mean(m_strict['spec_logprob']):.2%}")
     print("="*60)
     print("Injection stats:")
     print(f"  Rewrite inject rate:     {stats['rewrite_inject']}/{stats['rewrite_total']}")
