@@ -27,7 +27,7 @@
   "use_backward": true,
   "use_judge": true,
   "use_distract": true,
-  "num_paraphrase": 20,
+  "num_paraphrase": 40,
   "device": "cuda",
   "seed": null,
   "verbose": true,
