@@ -19,13 +19,13 @@
   "w_edit": 10.0,
   "w_suppress": 1.0,
   "w_ortho": 0.1,
-  "w_local": 2.0,
+  "w_local": 2.5,
 
   "ortho_prompt_lambda": 1.0,
   "ortho_token_lambda": 1.0,
   "ortho_method": "inner_product",
 
-  "routing_threshold": 0.9,
+  "routing_threshold": 0.95,
   "use_embedding_routing": true,
   "use_template_routing": false,
   "routing_aggregation": "max",
