@@ -1,6 +1,6 @@
 {
   "model_name": "gpt2-xl",
-  "target_layers": [35, 36, 37, 38, 39],
+  "target_layers": [13, 14, 15, 16, 17],
   "token_init_method": "target_smart",
   "token_init_std": 0.1,
   "learnable_gates": true,
