@@ -285,6 +285,8 @@ class TokenEditEditor:
         micro_batch_size = min(16, desired_batch_size)
         grad_accum_steps = max(1, int(np.ceil(desired_batch_size / micro_batch_size)))
 
+        best_loss = None
+        stale_epochs = 0
         for epoch in tqdm(range(self.hparams.num_epochs), desc="Training"):
             epoch_loss = 0.0
             num_batches = 0
@@ -338,7 +340,21 @@ class TokenEditEditor:
             if scheduler:
                 scheduler.step()
             if num_batches > 0:
-                stats['losses'].append(epoch_loss / num_batches)
+                epoch_avg = epoch_loss / num_batches
+                stats['losses'].append(epoch_avg)
+
+                patience = self.hparams.early_stop_patience
+                min_delta = self.hparams.early_stop_min_delta
+                if patience is not None and patience > 0:
+                    if best_loss is None or (best_loss - epoch_avg) > min_delta:
+                        best_loss = epoch_avg
+                        stale_epochs = 0
+                    else:
+                        stale_epochs += 1
+                        if stale_epochs >= patience:
+                            if self.hparams.verbose:
+                                print(f"[EarlyStop] no improvement for {patience} epochs")
+                            break
 
         return stats
 

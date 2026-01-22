@@ -60,6 +60,10 @@ class TokenEditHyperParams:
     verbose: bool = True
     save_checkpoints: bool = True
     checkpoint_dir: str = "./checkpoints"
+
+    # Early stopping (set patience to 0 or None to disable)
+    early_stop_patience: Optional[int] = 20
+    early_stop_min_delta: float = 1e-4
     
     @classmethod
     def from_yaml(cls, path: str):
