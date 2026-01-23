@@ -254,6 +254,7 @@ class TokenEditEditor:
             req = data['request']
             subject = req['subject']
 
+            rewrite_set = set(closure.get('rewrite_prompts', []))
             for prompt in closure.get('prompts_forward', []):
                 subject_positions = self.utils.find_subject_positions(
                     prompt, subject, verbose=False, add_special_tokens=True
@@ -263,6 +264,7 @@ class TokenEditEditor:
                         'edit_id': edit_id,
                         'prompt': prompt,
                         'type': 'forward',
+                        'is_rewrite': prompt in rewrite_set,
                         'subject_positions': subject_positions,
                         'target': closure.get('targets_forward', ''),
                         'old_target': closure.get('targets_backward', '')
@@ -379,6 +381,8 @@ class TokenEditEditor:
 
                 if target:
                     edit_loss = self._compute_edit_loss_fast(edit_id, prompt, target, subject_positions)
+                    if sample.get('is_rewrite'):
+                        edit_loss = edit_loss * self.hparams.rewrite_loss_scale
                     total_loss += self.hparams.w_edit * edit_loss
 
                 if old_target:

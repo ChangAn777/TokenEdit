@@ -35,6 +35,9 @@ class TokenEditHyperParams:
     w_suppress: float = 1.0   # [修改] 适度抑制，从 0.5 -> 1.0
     w_ortho: float = 0.01     # [修改] 放松约束，从 0.3 -> 0.01
     w_local: float = 2.0      # [修改] 保护邻居，从 0.2 -> 2.0
+
+    # Rewrite样本权重（提高编辑成功率）
+    rewrite_loss_scale: float = 2.0
     
     # 正交约束
     ortho_prompt_lambda: float = 1.0
