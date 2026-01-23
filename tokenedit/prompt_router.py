@@ -31,13 +31,20 @@ class PromptRouter:
         self.hparams = hparams
         self.device = hparams.device
 
-        # 存储每个编辑的嵌入
-        self.edit_embeddings: Dict[int, torch.Tensor] = {}
+        # Store embeddings per edit (can include paraphrases)
+        self.edit_embeddings: Dict[int, List[torch.Tensor]] = {}
 
         # 存储主体和关系信息
         self.edit_info: Dict[int, Dict[str, str]] = {}
 
-    def register_edit(self, edit_id: int, subject: str, relation: str, prompt_template: str = None):
+    def register_edit(
+        self,
+        edit_id: int,
+        subject: str,
+        relation: str,
+        prompt_template: str = None,
+        paraphrase_prompts: Optional[List[str]] = None,
+    ):
         """
         注册编辑
 
@@ -57,14 +64,19 @@ class PromptRouter:
                 # 回退到使用subject + relation
                 text = f"{subject} {relation}"
 
-            inputs = self.tokenizer(text, return_tensors="pt", add_special_tokens=True).to(self.device)
+            texts = [text]
+            if paraphrase_prompts:
+                texts.extend(paraphrase_prompts[:3])
 
-            with torch.no_grad():
-                outputs = self.model(**inputs, output_hidden_states=True)
-                # 使用最后一层的平均池化
-                embedding = outputs.hidden_states[-1].mean(dim=1)  # (1, hidden_size)
+            embeddings = []
+            for t in texts:
+                inputs = self.tokenizer(t, return_tensors="pt", add_special_tokens=True).to(self.device)
+                with torch.no_grad():
+                    outputs = self.model(**inputs, output_hidden_states=True)
+                    embedding = outputs.hidden_states[-1].mean(dim=1)  # (1, hidden_size)
+                embeddings.append(embedding)
 
-            self.edit_embeddings[edit_id] = embedding
+            self.edit_embeddings[edit_id] = embeddings
 
         # 2. 存储信息
         self.edit_info[edit_id] = {
@@ -77,6 +89,16 @@ class PromptRouter:
         """
         Route a prompt to a matching edit id.
         """
+        def _template_overlap(prompt_text: str, template: str, subject: str) -> float:
+            if not template:
+                return 0.0
+            filled = template.replace("{}", subject)
+            template_words = set(filled.lower().split())
+            prompt_words = set(prompt_text.lower().split())
+            if not template_words:
+                return 0.0
+            return len(template_words & prompt_words) / float(len(template_words))
+
         if self.hparams.use_embedding_routing:
             if len(self.edit_embeddings) == 0:
                 return None
@@ -88,9 +110,12 @@ class PromptRouter:
                     prompt_embedding = outputs.hidden_states[-1].mean(dim=1)
 
             similarities = {}
-            for edit_id, edit_emb in self.edit_embeddings.items():
-                sim = F.cosine_similarity(prompt_embedding, edit_emb, dim=-1).item()
-                similarities[edit_id] = sim
+            for edit_id, edit_embs in self.edit_embeddings.items():
+                best_sim = None
+                for emb in edit_embs:
+                    sim = F.cosine_similarity(prompt_embedding, emb, dim=-1).item()
+                    best_sim = sim if best_sim is None else max(best_sim, sim)
+                similarities[edit_id] = best_sim if best_sim is not None else -1.0
 
             subject_matched_ids = []
             for edit_id, info in self.edit_info.items():
@@ -100,7 +125,17 @@ class PromptRouter:
 
             if similarities:
                 if subject_matched_ids:
-                    best_edit_id = max(subject_matched_ids, key=lambda k: similarities.get(k, -1.0))
+                    filtered_ids = []
+                    for edit_id in subject_matched_ids:
+                        info = self.edit_info.get(edit_id, {})
+                        template = info.get("prompt_template")
+                        subject = info.get("subject", "")
+                        if template:
+                            if _template_overlap(prompt, template, subject) < 0.3:
+                                continue
+                        filtered_ids.append(edit_id)
+                    candidate_ids = filtered_ids if filtered_ids else subject_matched_ids
+                    best_edit_id = max(candidate_ids, key=lambda k: similarities.get(k, -1.0))
                 else:
                     best_edit_id = max(similarities, key=similarities.get)
                 best_sim = similarities.get(best_edit_id, -1.0)

@@ -135,7 +135,8 @@ class TokenEditEditor:
                 i,
                 req['subject'],
                 req.get('relation_id', req.get('relation', 'unknown')),
-                req.get('prompt')
+                req.get('prompt'),
+                req.get('paraphrase_prompts', []),
             )
             # 存入注册表，供 Subject Guard 使用
             self.edits_registry[i] = req
