@@ -9,8 +9,19 @@
   "use_low_rank": false,
   "token_rank": 64,
 
+  "edit_module_type": "enhanced",
+  "use_multiscale": true,
+  "use_context_gating": false,
+  "use_temperature": true,
+  "use_residual_scaling": true,
+
+  "injector_type": "enhanced",
+  "use_progressive_injection": true,
+  "use_attention_injection": false,
+  "use_dynamic_layers": false,
+
   "num_epochs": 250,
-  "learning_rate": 0.01,
+  "learning_rate": 0.005,
   "batch_size": 1,
   "optimizer": "adam",
   "scheduler": "cosine",
@@ -19,8 +30,14 @@
   "w_edit": 10.0,
   "w_suppress": 1.0,
   "w_ortho": 0.1,
-  "w_local": 2.5,
+  "w_local": 2.0,
   "rewrite_loss_scale": 2.0,
+
+  "use_curriculum": false,
+  "use_hard_mining": false,
+  "use_adaptive_weights": false,
+  "use_contrastive_loss": false,
+  "use_focal_loss": false,
 
   "ortho_prompt_lambda": 1.0,
   "ortho_token_lambda": 1.0,
