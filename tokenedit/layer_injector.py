@@ -147,6 +147,10 @@ class EnhancedLayerInjector:
         self.subject_positions = None
 
 
+
+# Backward-compatible alias.
+LayerInjector = EnhancedLayerInjector
+
 class AttentionGuidedInjector:
     """
     注意力引导注入器
