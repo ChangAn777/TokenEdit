@@ -269,6 +269,9 @@ class EnhancedEditTokenModule(nn.Module):
         
         return modified
 
+# Backward-compatible alias.
+EditTokenModule = EnhancedEditTokenModule
+
 
 class AdaptiveEditTokenModule(nn.Module):
     """
